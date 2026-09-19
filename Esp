@@ -1,0 +1,1644 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+local Camera = Workspace.CurrentCamera
+local LocalPlayer = Players.LocalPlayer
+
+-- СБРОС состояния предыдущего запуска
+if _G.__espKill then
+    if _G.__espKill.connections then
+        for _, c in ipairs(_G.__espKill.connections) do
+            pcall(function() c:Disconnect() end)
+        end
+    end
+    pcall(function() RunService:UnbindFromRenderStep("ESP_Render") end)
+    pcall(function() RunService:UnbindFromRenderStep("AIM_Render") end)
+    local lp = Players.LocalPlayer
+    local pg = lp and lp:FindFirstChild("PlayerGui")
+    if pg then
+        for _, name in ipairs({"ESP_Hub", "ESP_BackAlert", "ESP_AimFOV", "ESP_AimBtn", "ESP_MenuBtn"}) do
+            local g = pg:FindFirstChild(name)
+            if g then pcall(function() g:Destroy() end) end
+        end
+    end
+    pcall(function()
+        if Drawing and Drawing.clear then Drawing.clear() end
+    end)
+end
+
+_G.__espKill = { dead = false, connections = {} }
+local function track(conn)
+    table.insert(_G.__espKill.connections, conn)
+    return conn
+end
+
+local CONFIG = {
+    VisibleColor = Color3.fromRGB(255, 0, 0),
+    HiddenColor  = Color3.fromRGB(0, 255, 0),
+    OutlineColor = Color3.fromRGB(255, 255, 255),
+    Transparency = 0.35,
+    OutlineTransparency = 0,
+    ShowDead = true,
+
+    ESP_TeamCheck = false,
+    Aim_TeamCheck = false,
+
+    UseHighlight = true,
+    UseSelectionBox = false,
+
+    TracerEnabled = true,
+    TracerTransparency = 0.6,
+    TracerThickness = 1,
+    TracerFromBottom = true,
+
+    VisibilityCheckRate = 0.05,
+    CheckHeadOnly = true,
+
+    BackAlertEnabled = true,
+    BackAlertColor = Color3.fromRGB(255, 200, 0),
+    BackAlertSize = 16,
+    BackAlertStroke = 2,
+    BackAlertRadiusX = 0.20,
+    BackAlertRadiusY = 0.20,
+
+    BoxEnabled = true,
+    BoxThickness = 1,
+    BoxTransparency = 0.15,
+    BoxWidthRatio = 0.55,
+
+    HPBarEnabled = true,
+    HPTextEnabled = true,
+    HPTransparency = 0.1,
+    HPBarHeight = 4,
+
+    DistTextEnabled = true,
+
+    UIScale = 1,
+
+    AimEnabled = true,
+    AimFOV = 150,
+    AimSmoothness = 0.25,
+    AimTargetPart = "Head",
+    AimVisibleOnly = false,
+    AimPrediction = 0.15,
+    AimDrawFOV = true,
+}
+
+local ESP_ENABLED = true
+local VISIBILITY_ENABLED = true
+local AIM_ACTIVE = false
+local IS_MOBILE = not UserInputService.MouseEnabled
+
+local highlights = {}
+local tracers = {}
+local visibility = {}
+local espObjects = {}
+
+-- ============================================================
+-- УНИВЕРСАЛЬНЫЙ ПОИСК МОДЕЛИ ИГРОКА (скины)
+-- ============================================================
+local function isPlayerModel(obj, player)
+    if not obj or not obj:IsA("Model") then return false end
+    local uid = obj:GetAttribute("Player")
+        or obj:GetAttribute("UserId")
+        or obj:GetAttribute("Owner")
+        or obj:GetAttribute("PlayerId")
+    if uid ~= nil then
+        if uid == player.UserId or uid == player.Name then return true end
+    end
+    if obj.Name == player.Name then return true end
+    if obj.Name:find(player.Name, 1, true) then return true end
+    return false
+end
+
+local function getPlayerModel(player)
+    if player == LocalPlayer then return nil end
+
+    local char = player.Character
+    if char and char.Parent and char:FindFirstChildOfClass("Humanoid") then
+        return char
+    end
+
+    for _, obj in ipairs(Workspace:GetChildren()) do
+        if obj:IsA("Model") and obj:FindFirstChildOfClass("Humanoid") then
+            if isPlayerModel(obj, player) then
+                return obj
+            end
+        end
+    end
+
+    for _, obj in ipairs(Workspace:GetChildren()) do
+        if obj:IsA("Model") and obj.Name == player.Name then
+            return obj
+        end
+    end
+
+    return char
+end
+
+local function getAnyHumanoid(model)
+    if not model then return nil end
+    return model:FindFirstChildOfClass("Humanoid")
+        or (model.Parent and model.Parent:FindFirstChildOfClass("Humanoid"))
+end
+
+local function getAnyPart(model, preferName)
+    if not model then return nil end
+    if preferName then
+        local p = model:FindFirstChild(preferName)
+        if p and p:IsA("BasePart") then return p end
+    end
+    local hrp = model:FindFirstChild("HumanoidRootPart")
+    if hrp and hrp:IsA("BasePart") then return hrp end
+    for _, obj in ipairs(model:GetDescendants()) do
+        if obj:IsA("BasePart") then return obj end
+    end
+    return nil
+end
+
+-- ============================================================
+-- TEAM
+-- ============================================================
+local function isSameTeam(p1, p2)
+    if p1 == p2 then return true end
+    local t1, t2 = p1.Team, p2.Team
+    if t1 ~= nil and t2 ~= nil then return t1 == t2 end
+    local a1 = p1:GetAttribute("Team") or p1:GetAttribute("TeamName")
+    local a2 = p2:GetAttribute("Team") or p2:GetAttribute("TeamName")
+    if a1 ~= nil and a2 ~= nil then return a1 == a2 end
+    return false
+end
+
+local function shouldShow(player)
+    if player == LocalPlayer then return false end
+    if CONFIG.ESP_TeamCheck and isSameTeam(player, LocalPlayer) then return false end
+    return true
+end
+
+local function effectiveVisible(player)
+    if not VISIBILITY_ENABLED then return true end
+    local v = visibility[player]
+    if v == nil then return true end
+    return v == true
+end
+
+-- ============================================================
+-- VISIBILITY
+-- ============================================================
+local function raycastVisible(targetModel, checkPoint)
+    if not targetModel or not checkPoint then return false end
+    local camPos = Camera.CFrame.Position
+    local dir = checkPoint.Position - camPos
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = { LocalPlayer.Character }
+    params.IgnoreWater = true
+    local result = Workspace:Raycast(camPos, dir, params)
+    if not result then return true end
+    if result.Instance:IsDescendantOf(targetModel) then return true end
+    return false
+end
+
+local function checkVisibility(player)
+    if not shouldShow(player) then return false end
+    local model = getPlayerModel(player)
+    if not model then return false end
+
+    local head = model:FindFirstChild("Head") or getAnyPart(model, "Head")
+    if head and raycastVisible(model, head) then return true end
+
+    if not CONFIG.CheckHeadOnly then
+        local torso = model:FindFirstChild("UpperTorso")
+            or model:FindFirstChild("Torso")
+            or getAnyPart(model)
+        if torso and raycastVisible(model, torso) then return true end
+    end
+    return false
+end
+
+-- ============================================================
+-- HIGHLIGHT
+-- ============================================================
+local function removeHighlightsFor(player)
+    if highlights[player] then
+        highlights[player]:Destroy()
+        highlights[player] = nil
+    end
+end
+
+local function addHighlightsFor(player)
+    if not ESP_ENABLED or not shouldShow(player) then
+        removeHighlightsFor(player)
+        return
+    end
+    local model = getPlayerModel(player)
+    if not model then return end
+
+    removeHighlightsFor(player)
+
+    if CONFIG.UseHighlight then
+        local h = Instance.new("Highlight")
+        h.Name = "ESP_HL_" .. player.Name
+        h.FillColor = effectiveVisible(player) and CONFIG.VisibleColor or CONFIG.HiddenColor
+        h.OutlineColor = CONFIG.OutlineColor
+        h.FillTransparency = CONFIG.Transparency
+        h.OutlineTransparency = CONFIG.OutlineTransparency
+        h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        h.Adornee = model
+        h.Parent = Workspace
+        highlights[player] = h
+    end
+end
+
+local function applyHighlightStyles()
+    for _, h in pairs(highlights) do
+        if h and h.Parent then
+            h.FillTransparency = CONFIG.Transparency
+            h.OutlineTransparency = CONFIG.OutlineTransparency
+            h.OutlineColor = CONFIG.OutlineColor
+        end
+    end
+end
+
+local function updateHighlightColor(player)
+    local vis = effectiveVisible(player)
+    local col = vis and CONFIG.VisibleColor or CONFIG.HiddenColor
+    local h = highlights[player]
+    if h and h.Parent then h.FillColor = col end
+end
+
+-- ============================================================
+-- TRACER
+-- ============================================================
+local function applyTracerStyles()
+    for _, line in pairs(tracers) do
+        pcall(function()
+            line.Thickness = CONFIG.TracerThickness
+            line.Transparency = CONFIG.TracerTransparency
+        end)
+    end
+end
+
+local function getTracer(player)
+    if not CONFIG.TracerEnabled then return nil end
+    if not tracers[player] then
+        local ok, line = pcall(function() return Drawing.new("Line") end)
+        if not ok or not line then return nil end
+        line.Thickness = CONFIG.TracerThickness
+        line.Transparency = CONFIG.TracerTransparency
+        line.Color = CONFIG.VisibleColor
+        line.Visible = false
+        tracers[player] = line
+    end
+    return tracers[player]
+end
+
+local function removeTracer(player)
+    if tracers[player] then
+        pcall(function() tracers[player]:Remove() end)
+        tracers[player] = nil
+    end
+end
+
+-- ============================================================
+-- BOX + HP (Drawing)
+-- ============================================================
+local function makeESPDrawings()
+    local ok = pcall(function() return Drawing.new("Square") end)
+    if not ok then return nil end
+
+    local box = Drawing.new("Square")
+    box.Filled = false
+    box.Visible = false
+
+    local hpBg = Drawing.new("Square")
+    hpBg.Filled = true
+    hpBg.Color = Color3.fromRGB(0, 0, 0)
+    hpBg.Visible = false
+
+    local hpFill = Drawing.new("Square")
+    hpFill.Filled = true
+    hpFill.Visible = false
+
+    local hpText = Drawing.new("Text")
+    hpText.Center = true
+    hpText.Outline = true
+    hpText.OutlineColor = Color3.fromRGB(0, 0, 0)
+    hpText.Size = 13
+    hpText.Font = Drawing.Fonts.UI
+    hpText.Visible = false
+
+    local distText = Drawing.new("Text")
+    distText.Center = true
+    distText.Outline = true
+    distText.OutlineColor = Color3.fromRGB(0, 0, 0)
+    distText.Size = 13
+    distText.Font = Drawing.Fonts.UI
+    distText.Visible = false
+
+    return {
+        box = box,
+        hpBg = hpBg,
+        hpFill = hpFill,
+        hpText = hpText,
+        distText = distText,
+    }
+end
+
+local function getESPDrawings(player)
+    if not espObjects[player] then
+        espObjects[player] = makeESPDrawings()
+    end
+    return espObjects[player]
+end
+
+local function removeESPDrawings(player)
+    local d = espObjects[player]
+    if d then
+        for _, obj in pairs(d) do
+            pcall(function() obj:Remove() end)
+        end
+        espObjects[player] = nil
+    end
+end
+
+local function hideESPDrawings(player)
+    local d = espObjects[player]
+    if not d then return end
+    d.box.Visible = false
+    d.hpBg.Visible = false
+    d.hpFill.Visible = false
+    d.hpText.Visible = false
+    d.distText.Visible = false
+end
+
+local function updateESPDrawings(player)
+    local d = getESPDrawings(player)
+    if not d then return end
+
+    if not ESP_ENABLED or not shouldShow(player) then
+        hideESPDrawings(player); return
+    end
+
+    local model = getPlayerModel(player)
+    if not model then hideESPDrawings(player); return end
+
+    local hum = getAnyHumanoid(model)
+    if not hum then hideESPDrawings(player); return end
+
+    local headPart = model:FindFirstChild("Head") or getAnyPart(model, "Head")
+    local rootPart = model:FindFirstChild("HumanoidRootPart")
+        or model:FindFirstChild("UpperTorso")
+        or model:FindFirstChild("Torso")
+        or getAnyPart(model)
+
+    if not headPart or not rootPart then
+        local top, bot
+        for _, obj in ipairs(model:GetDescendants()) do
+            if obj:IsA("BasePart") then
+                if not top or obj.Position.Y > top.Position.Y then top = obj end
+                if not bot or obj.Position.Y < bot.Position.Y then bot = obj end
+            end
+        end
+        headPart = headPart or top
+        rootPart = rootPart or bot
+    end
+
+    if not headPart then hideESPDrawings(player); return end
+
+    local topPos = headPart.Position + Vector3.new(0, 0.6, 0)
+
+    local hip = 2.5
+    if hum then hip = hum.HipHeight or 2.5 end
+    local botPos = Vector3.new(rootPart.Position.X,
+        rootPart.Position.Y - hip, rootPart.Position.Z)
+
+    local spTop = Camera:WorldToViewportPoint(topPos)
+    local spBot = Camera:WorldToViewportPoint(botPos)
+
+    if spTop.Z <= 0 and spBot.Z <= 0 then
+        hideESPDrawings(player); return
+    end
+
+    local topX, topY, topZ = spTop.X, spTop.Y, spTop.Z
+    local botX, botY, botZ = spBot.X, spBot.Y, spBot.Z
+    if topZ <= 0 then topY = botY - 100; topX = botX end
+    if botZ <= 0 then botY = topY + 100; botX = topX end
+
+    local yTop = math.min(topY, botY)
+    local yBot = math.max(topY, botY)
+    local boxH = yBot - yTop
+    if boxH < 3 then hideESPDrawings(player); return end
+
+    local boxW = boxH * CONFIG.BoxWidthRatio
+    local xCenter = (topX + botX) / 2
+    local xLeft = xCenter - boxW / 2
+
+    local vis = effectiveVisible(player)
+    local boxColor = vis and CONFIG.VisibleColor or CONFIG.HiddenColor
+
+    -- ===== BOX =====
+    if CONFIG.BoxEnabled then
+        d.box.Visible = true
+        d.box.Position = Vector2.new(xLeft, yTop)
+        d.box.Size = Vector2.new(boxW, boxH)
+        d.box.Thickness = CONFIG.BoxThickness
+        d.box.Color = boxColor
+        d.box.Transparency = CONFIG.BoxTransparency
+    else
+        d.box.Visible = false
+    end
+
+    local barH = CONFIG.HPBarHeight
+    local hpPct = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
+
+    -- ===== HP BAR — НАД БОКСОМ =====
+    local barY = yTop - barH - 3
+
+    if CONFIG.HPBarEnabled then
+        d.hpBg.Visible = true
+        d.hpBg.Position = Vector2.new(xLeft, barY)
+        d.hpBg.Size = Vector2.new(boxW, barH)
+        d.hpBg.Color = Color3.fromRGB(0, 0, 0)
+        d.hpBg.Transparency = CONFIG.HPTransparency
+
+        d.hpFill.Visible = true
+        d.hpFill.Position = Vector2.new(xLeft, barY)
+        d.hpFill.Size = Vector2.new(boxW * hpPct, barH)
+        d.hpFill.Color = Color3.fromRGB(255, 60, 60):Lerp(Color3.fromRGB(60, 255, 60), hpPct)
+        d.hpFill.Transparency = CONFIG.HPTransparency
+    else
+        d.hpBg.Visible = false
+        d.hpFill.Visible = false
+    end
+
+    -- ===== HP TEXT — над HP-баром =====
+    if CONFIG.HPTextEnabled then
+        d.hpText.Visible = true
+        d.hpText.Position = Vector2.new(xLeft + boxW / 2, barY - 15)
+        d.hpText.Text = string.format("%d / %d",
+            math.floor(hum.Health + 0.5), math.floor(hum.MaxHealth + 0.5))
+        d.hpText.Color = Color3.fromRGB(255, 255, 255)
+        d.hpText.Transparency = CONFIG.HPTransparency
+    else
+        d.hpText.Visible = false
+    end
+
+    -- ===== DISTANCE (метры) — ПОД БОКСОМ =====
+    local myChar = LocalPlayer.Character
+    local myRoot = myChar and (
+        myChar:FindFirstChild("HumanoidRootPart")
+        or myChar:FindFirstChild("UpperTorso")
+        or myChar:FindFirstChild("Torso")
+    )
+
+    local dist = 0
+    if myRoot and rootPart then
+        dist = (rootPart.Position - myRoot.Position).Magnitude
+    end
+
+    if CONFIG.DistTextEnabled then
+        d.distText.Visible = true
+        d.distText.Position = Vector2.new(xLeft + boxW / 2, yBot + 4)
+        d.distText.Text = string.format("%d m", math.floor(dist + 0.5))
+        d.distText.Color = Color3.fromRGB(255, 255, 255)
+        d.distText.Transparency = CONFIG.HPTransparency
+    else
+        d.distText.Visible = false
+    end
+end
+
+-- ============================================================
+-- BACK ALERT
+-- ============================================================
+local alertGui = Instance.new("ScreenGui")
+alertGui.Name = "ESP_BackAlert"
+alertGui.IgnoreGuiInset = true
+alertGui.ResetOnSpawn = false
+alertGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+local alertMarkers = {}
+
+local function getAlertMarker(player)
+    if alertMarkers[player] then return alertMarkers[player] end
+    local f = Instance.new("Frame")
+    f.Name = "Alert_" .. player.Name
+    f.Size = UDim2.new(0, CONFIG.BackAlertSize, 0, CONFIG.BackAlertSize)
+    f.AnchorPoint = Vector2.new(0.5, 0.5)
+    f.BackgroundColor3 = CONFIG.BackAlertColor
+    f.BorderSizePixel = 0
+    f.Visible = false
+    f.ZIndex = 10
+    f.Parent = alertGui
+
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(1, 0)
+    c.Parent = f
+
+    local s = Instance.new("UIStroke")
+    s.Name = "AlertStroke"
+    s.Color = Color3.fromRGB(255, 255, 255)
+    s.Thickness = CONFIG.BackAlertStroke
+    s.Parent = f
+
+    alertMarkers[player] = f
+    return f
+end
+
+local function removeAlertMarker(player)
+    if alertMarkers[player] then
+        alertMarkers[player]:Destroy()
+        alertMarkers[player] = nil
+    end
+end
+
+local function applyAlertStyles()
+    for _, m in pairs(alertMarkers) do
+        m.Size = UDim2.new(0, CONFIG.BackAlertSize, 0, CONFIG.BackAlertSize)
+        local s = m:FindFirstChild("AlertStroke")
+        if s then s.Thickness = CONFIG.BackAlertStroke end
+        m.BackgroundColor3 = CONFIG.BackAlertColor
+    end
+end
+
+local function hideAllAlerts()
+    for _, m in pairs(alertMarkers) do m.Visible = false end
+end
+
+local function updateBackAlerts()
+    if not CONFIG.BackAlertEnabled then
+        for _, m in pairs(alertMarkers) do m.Visible = false end
+        return
+    end
+
+    local vp = Camera.ViewportSize
+    local center = Vector2.new(vp.X / 2, vp.Y / 2)
+    local radiusX = vp.X * CONFIG.BackAlertRadiusX
+    local radiusY = vp.Y * CONFIG.BackAlertRadiusY
+
+    local camCF = Camera.CFrame
+    local camPos = camCF.Position
+    local forward = camCF.LookVector
+    local right = camCF.RightVector
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player == LocalPlayer or not shouldShow(player) then
+            local m = alertMarkers[player]
+            if m then m.Visible = false end
+            continue
+        end
+
+        local model = getPlayerModel(player)
+        local m = getAlertMarker(player)
+
+        if not model then m.Visible = false; continue end
+
+        local head = model:FindFirstChild("Head") or getAnyPart(model)
+        if not head then m.Visible = false; continue end
+
+        local toPlayer = head.Position - camPos
+        if toPlayer.Magnitude < 0.1 then m.Visible = false; continue end
+
+        local dir = toPlayer.Unit
+        local dot = forward:Dot(dir)
+        if dot >= 0 then m.Visible = false; continue end
+
+        local az = math.atan2(dir:Dot(right), dot)
+        local sx = center.X + math.sin(az) * radiusX
+        local sy = center.Y - math.cos(az) * radiusY
+
+        m.Position = UDim2.new(0, sx, 0, sy)
+        m.Visible = true
+    end
+end
+
+-- ============================================================
+-- FOV
+-- ============================================================
+local fovGui = Instance.new("ScreenGui")
+fovGui.Name = "ESP_AimFOV"
+fovGui.IgnoreGuiInset = true
+fovGui.ResetOnSpawn = false
+fovGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+local fovCircle = Instance.new("Frame")
+fovCircle.Size = UDim2.new(0, CONFIG.AimFOV * 2, 0, CONFIG.AimFOV * 2)
+fovCircle.AnchorPoint = Vector2.new(0.5, 0.5)
+fovCircle.BackgroundTransparency = 1
+fovCircle.BorderSizePixel = 0
+fovCircle.ZIndex = 5
+fovCircle.Visible = false
+fovCircle.Parent = fovGui
+
+local fovStroke = Instance.new("UIStroke")
+fovStroke.Color = Color3.fromRGB(255, 60, 60)
+fovStroke.Thickness = 1
+fovStroke.Transparency = 0.4
+fovStroke.Parent = fovCircle
+
+local fovCorner = Instance.new("UICorner")
+fovCorner.CornerRadius = UDim.new(1, 0)
+fovCorner.Parent = fovCircle
+
+local function applyFOVStyle()
+    fovCircle.Size = UDim2.new(0, CONFIG.AimFOV * 2, 0, CONFIG.AimFOV * 2)
+end
+applyFOVStyle()
+
+local function getAimCenter()
+    if UserInputService.MouseEnabled then
+        return UserInputService:GetMouseLocation()
+    end
+    local vp = Camera.ViewportSize
+    return Vector2.new(vp.X / 2, vp.Y / 2)
+end
+
+-- ============================================================
+-- TOGGLE
+-- ============================================================
+local function disableAllESP()
+    for _, p in ipairs(Players:GetPlayers()) do
+        removeHighlightsFor(p)
+        hideESPDrawings(p)
+    end
+    for _, line in pairs(tracers) do
+        pcall(function() line.Visible = false end)
+    end
+    hideAllAlerts()
+end
+
+local function enableAllESP()
+    for _, p in ipairs(Players:GetPlayers()) do
+        addHighlightsFor(p)
+    end
+end
+
+-- ============================================================
+-- PLAYER SETUP
+-- ============================================================
+local function setupPlayer(player)
+    if player == LocalPlayer then return end
+
+    track(player.CharacterAdded:Connect(function()
+        visibility[player] = true
+        task.wait(0.5)
+        if _G.__espKill.dead then return end
+        addHighlightsFor(player)
+    end))
+
+    track(player.CharacterRemoving:Connect(function()
+        removeHighlightsFor(player)
+        hideESPDrawings(player)
+    end))
+
+    track(player:GetPropertyChangedSignal("Team"):Connect(function()
+        if _G.__espKill.dead then return end
+        addHighlightsFor(player)
+    end))
+
+    if player.Character then
+        visibility[player] = true
+        task.spawn(function()
+            task.wait(0.5)
+            if _G.__espKill.dead then return end
+            addHighlightsFor(player)
+        end)
+    end
+end
+
+for _, p in ipairs(Players:GetPlayers()) do setupPlayer(p) end
+track(Players.PlayerAdded:Connect(function(p)
+    visibility[p] = true
+    setupPlayer(p)
+end))
+track(Players.PlayerRemoving:Connect(function(player)
+    removeHighlightsFor(player)
+    removeTracer(player)
+    removeAlertMarker(player)
+    removeESPDrawings(player)
+    visibility[player] = nil
+end))
+
+-- ============================================================
+-- VISIBILITY LOOP
+-- ============================================================
+track(RunService.Heartbeat:Connect((function()
+    local acc = 0
+    return function(dt)
+        if _G.__espKill.dead then return end
+        acc = acc + dt
+        if acc < CONFIG.VisibilityCheckRate then return end
+        acc = 0
+
+        if not ESP_ENABLED then return end
+
+        if not VISIBILITY_ENABLED then
+            for _, p in ipairs(Players:GetPlayers()) do visibility[p] = true end
+        else
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p ~= LocalPlayer then visibility[p] = checkVisibility(p) end
+            end
+        end
+        for _, p in ipairs(Players:GetPlayers()) do updateHighlightColor(p) end
+    end
+end)()))
+
+-- ============================================================
+-- ESP RENDER
+-- ============================================================
+local function renderTracers()
+    if not CONFIG.TracerEnabled or not ESP_ENABLED then
+        for _, line in pairs(tracers) do
+            pcall(function() line.Visible = false end)
+        end
+        return
+    end
+
+    local vp = Camera.ViewportSize
+    local origin = CONFIG.TracerFromBottom
+        and Vector2.new(vp.X / 2, vp.Y)
+        or Vector2.new(vp.X / 2, vp.Y / 2)
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player == LocalPlayer or not shouldShow(player) then
+            local line = tracers[player]
+            if line then line.Visible = false end
+            continue
+        end
+
+        local model = getPlayerModel(player)
+        local line = getTracer(player)
+        if not line then continue end
+        if not model then line.Visible = false; continue end
+
+        local head = model:FindFirstChild("Head") or getAnyPart(model)
+        if not head then line.Visible = false; continue end
+
+        local screenPos, onScreen = Camera:WorldToViewportPoint(head.Position)
+        if not onScreen or screenPos.Z <= 0 then
+            line.Visible = false
+            continue
+        end
+
+        line.Color = effectiveVisible(player) and CONFIG.VisibleColor or CONFIG.HiddenColor
+        line.From = origin
+        line.To = Vector2.new(screenPos.X, screenPos.Y)
+        line.Visible = true
+    end
+end
+
+RunService:BindToRenderStep("ESP_Render", Enum.RenderPriority.Camera.Value + 2, function()
+    if _G.__espKill.dead then return end
+    if not ESP_ENABLED then
+        for _, line in pairs(tracers) do
+            pcall(function() line.Visible = false end)
+        end
+        hideAllAlerts()
+        for _, p in ipairs(Players:GetPlayers()) do hideESPDrawings(p) end
+        return
+    end
+    renderTracers()
+    updateBackAlerts()
+    for _, p in ipairs(Players:GetPlayers()) do updateESPDrawings(p) end
+end)
+
+-- ============================================================
+-- AIM (только по toggle V / кнопке)
+-- ============================================================
+local function getAimTargetPart()
+    if not CONFIG.AimEnabled or not AIM_ACTIVE then return nil end
+
+    local center = getAimCenter()
+    local best, bestDist = nil, CONFIG.AimFOV
+
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p == LocalPlayer then continue end
+        if CONFIG.Aim_TeamCheck and isSameTeam(p, LocalPlayer) then continue end
+
+        local model = getPlayerModel(p)
+        if not model then continue end
+
+        local hum = getAnyHumanoid(model)
+        if not hum or hum.Health <= 0 then continue end
+
+        local part = model:FindFirstChild(CONFIG.AimTargetPart)
+        if not (part and part:IsA("BasePart")) then
+            part = model:FindFirstChild("Head") or getAnyPart(model)
+        end
+        if not part then continue end
+
+        if CONFIG.AimVisibleOnly and not effectiveVisible(p) then continue end
+
+        local sp, onScreen = Camera:WorldToViewportPoint(part.Position)
+        if not onScreen or sp.Z <= 0 then continue end
+
+        local dx = sp.X - center.X
+        local dy = sp.Y - center.Y
+        local dist = math.sqrt(dx * dx + dy * dy)
+
+        if dist < bestDist then
+            bestDist = dist
+            best = part
+        end
+    end
+
+    return best
+end
+
+RunService:BindToRenderStep("AIM_Render", Enum.RenderPriority.Camera.Value + 1, function()
+    if _G.__espKill.dead then return end
+
+    if CONFIG.AimDrawFOV and CONFIG.AimEnabled and AIM_ACTIVE then
+        local center = getAimCenter()
+        fovCircle.Position = UDim2.new(0, center.X, 0, center.Y)
+        fovCircle.Visible = true
+    else
+        fovCircle.Visible = false
+    end
+
+    if not CONFIG.AimEnabled or not AIM_ACTIVE then return end
+
+    local target = getAimTargetPart()
+    if not target then return end
+
+    local camPos = Camera.CFrame.Position
+    local targetPos = target.Position
+
+    if CONFIG.AimPrediction > 0 then
+        local vel = target.AssemblyLinearVelocity
+        if vel then targetPos = targetPos + vel * CONFIG.AimPrediction end
+    end
+
+    local dir = (targetPos - camPos).Unit
+    local desired = CFrame.lookAt(camPos, camPos + dir)
+
+    local alpha = 1 - math.clamp(CONFIG.AimSmoothness, 0, 0.99)
+    Camera.CFrame = Camera.CFrame:Lerp(desired, alpha)
+end)
+
+-- ============================================================
+-- BACKGROUND RECREATE
+-- ============================================================
+track(task.spawn(function()
+    while not _G.__espKill.dead do
+        task.wait(1)
+        if _G.__espKill.dead then break end
+        if not ESP_ENABLED then continue end
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer then
+                local model = getPlayerModel(p)
+                if model and getAnyHumanoid(model) then
+                    if CONFIG.UseHighlight and (not highlights[p] or not highlights[p].Parent) then
+                        addHighlightsFor(p)
+                    end
+                end
+            end
+        end
+    end
+end))
+
+-- ============================================================
+-- MENU
+-- ============================================================
+local ACCENT       = Color3.fromRGB(255, 60, 60)
+local BG_DARK      = Color3.fromRGB(12, 12, 16)
+local BG_PANEL     = Color3.fromRGB(20, 20, 26)
+local BG_SIDEBAR   = Color3.fromRGB(16, 16, 20)
+local BG_ROW       = Color3.fromRGB(26, 26, 32)
+local TEXT_MAIN    = Color3.fromRGB(230, 230, 235)
+local TEXT_DIM     = Color3.fromRGB(150, 150, 160)
+local STROKE_COL   = Color3.fromRGB(45, 45, 55)
+
+local menuGui = Instance.new("ScreenGui")
+menuGui.Name = "ESP_Hub"
+menuGui.ResetOnSpawn = false
+menuGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+menuGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+local WIN_W, WIN_H = 460, 340
+
+local main = Instance.new("Frame")
+main.Size = UDim2.new(0, WIN_W, 0, WIN_H)
+main.Position = UDim2.new(0.5, -WIN_W/2, 0.5, -WIN_H/2)
+main.BackgroundColor3 = BG_DARK
+main.BorderSizePixel = 0
+main.Active = true
+main.Parent = menuGui
+
+local uiScale = Instance.new("UIScale")
+uiScale.Scale = CONFIG.UIScale
+uiScale.Parent = main
+
+local mainCorner = Instance.new("UICorner")
+mainCorner.CornerRadius = UDim.new(0, 6)
+mainCorner.Parent = main
+
+local mainStroke = Instance.new("UIStroke")
+mainStroke.Color = STROKE_COL
+mainStroke.Thickness = 1
+mainStroke.Parent = main
+
+do
+    local dragging, dragStart, startPos
+    local function beginDrag(input)
+        dragging = true
+        dragStart = input.Position
+        startPos = main.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then dragging = false end
+        end)
+    end
+    _G.__espBeginDrag = beginDrag
+    track(UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+           or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            main.Position = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + delta.X,
+                startPos.Y.Scale, startPos.Y.Offset + delta.Y
+            )
+        end
+    end))
+end
+
+local titleBar = Instance.new("Frame")
+titleBar.Size = UDim2.new(1, 0, 0, 30)
+titleBar.BackgroundColor3 = BG_PANEL
+titleBar.BorderSizePixel = 0
+titleBar.Parent = main
+
+local tbCorner = Instance.new("UICorner")
+tbCorner.CornerRadius = UDim.new(0, 6)
+tbCorner.Parent = titleBar
+
+local tbFix = Instance.new("Frame")
+tbFix.Size = UDim2.new(1, 0, 0, 10)
+tbFix.Position = UDim2.new(0, 0, 1, -10)
+tbFix.BackgroundColor3 = BG_PANEL
+tbFix.BorderSizePixel = 0
+tbFix.Parent = titleBar
+
+local accentBar = Instance.new("Frame")
+accentBar.Size = UDim2.new(0, 3, 0, 16)
+accentBar.Position = UDim2.new(0, 10, 0.5, -8)
+accentBar.BackgroundColor3 = ACCENT
+accentBar.BorderSizePixel = 0
+accentBar.Parent = titleBar
+
+local tbAccentCorner = Instance.new("UICorner")
+tbAccentCorner.CornerRadius = UDim.new(1, 0)
+tbAccentCorner.Parent = accentBar
+
+local titleLabel = Instance.new("TextLabel")
+titleLabel.Size = UDim2.new(1, -130, 1, 0)
+titleLabel.Position = UDim2.new(0, 22, 0, 0)
+titleLabel.BackgroundTransparency = 1
+titleLabel.Text = "ESP  HUB   v2.9"
+titleLabel.TextColor3 = TEXT_MAIN
+titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+titleLabel.Font = Enum.Font.GothamBold
+titleLabel.TextSize = 12
+titleLabel.Parent = titleBar
+
+local hintLabel = Instance.new("TextLabel")
+hintLabel.Size = UDim2.new(0, 110, 1, 0)
+hintLabel.Position = UDim2.new(1, -134, 0, 0)
+hintLabel.BackgroundTransparency = 1
+hintLabel.Text = IS_MOBILE and "[btn]" or "[RS | V=AIM]"
+hintLabel.TextColor3 = TEXT_DIM
+hintLabel.TextXAlignment = Enum.TextXAlignment.Right
+hintLabel.Font = Enum.Font.Gotham
+hintLabel.TextSize = 9
+hintLabel.Parent = titleBar
+
+local function mkWinBtn(xOff, text, cb)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(0, 20, 0, 20)
+    b.Position = UDim2.new(1, xOff, 0.5, -10)
+    b.BackgroundColor3 = BG_ROW
+    b.Text = text
+    b.TextColor3 = TEXT_MAIN
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 12
+    b.BorderSizePixel = 0
+    b.AutoButtonColor = false
+    b.Parent = titleBar
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, 4)
+    c.Parent = b
+    b.MouseButton1Click:Connect(function() cb(b) end)
+    return b
+end
+
+local sidebar, content
+
+local minBtn = mkWinBtn(-46, "—", function(self)
+    if main.Size.Y.Offset > 40 then
+        main.Size = UDim2.new(0, WIN_W, 0, 30)
+        if sidebar then sidebar.Visible = false end
+        if content then content.Visible = false end
+        self.Text = "+"
+    else
+        main.Size = UDim2.new(0, WIN_W, 0, WIN_H)
+        if sidebar then sidebar.Visible = true end
+        if content then content.Visible = true end
+        self.Text = "—"
+    end
+end)
+
+local closeBtn = mkWinBtn(-24, "X", function(self)
+    ESP_ENABLED = false
+    CONFIG.TracerEnabled = false
+    CONFIG.BackAlertEnabled = false
+    CONFIG.AimEnabled = false
+    _G.__espKill.dead = true
+
+    for _, h in pairs(highlights) do if h then h:Destroy() end end
+    highlights = {}
+    for _, line in pairs(tracers) do pcall(function() line:Remove() end) end
+    tracers = {}
+    for _, m in pairs(alertMarkers) do if m then m:Destroy() end end
+    alertMarkers = {}
+    for _, d in pairs(espObjects) do
+        for _, obj in pairs(d) do pcall(function() obj:Remove() end) end
+    end
+    espObjects = {}
+
+    for _, c in ipairs(_G.__espKill.connections) do
+        pcall(function() c:Disconnect() end)
+    end
+    _G.__espKill.connections = {}
+
+    pcall(function() RunService:UnbindFromRenderStep("ESP_Render") end)
+    pcall(function() RunService:UnbindFromRenderStep("AIM_Render") end)
+
+    pcall(function() menuGui:Destroy() end)
+    pcall(function() alertGui:Destroy() end)
+    pcall(function() fovGui:Destroy() end)
+    pcall(function() if _G.__espMenuBtn then _G.__espMenuBtn:Destroy() end end)
+    pcall(function() if _G.__espAimBtn then _G.__espAimBtn:Destroy() end end)
+
+    print("[ESP Hub] Скрипт выгружен.")
+end)
+
+titleBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+       or input.UserInputType == Enum.UserInputType.Touch then
+        if _G.__espBeginDrag then _G.__espBeginDrag(input) end
+    end
+end)
+
+-- AIM button
+local aimBtnGui = Instance.new("ScreenGui")
+aimBtnGui.Name = "ESP_AimBtn"
+aimBtnGui.IgnoreGuiInset = true
+aimBtnGui.ResetOnSpawn = false
+aimBtnGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+_G.__espAimBtn = aimBtnGui
+
+local aimButton = Instance.new("TextButton")
+aimButton.Size = UDim2.new(0, 60, 0, 60)
+aimButton.Position = UDim2.new(1, -84, 1, -180)
+aimButton.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+aimButton.BackgroundTransparency = 0.25
+aimButton.Text = "AIM\nOFF"
+aimButton.TextColor3 = Color3.fromRGB(200, 200, 200)
+aimButton.Font = Enum.Font.GothamBold
+aimButton.TextSize = 12
+aimButton.BorderSizePixel = 0
+aimButton.AutoButtonColor = false
+aimButton.Active = true
+aimButton.Parent = aimBtnGui
+
+local abCorner = Instance.new("UICorner")
+abCorner.CornerRadius = UDim.new(1, 0)
+abCorner.Parent = aimButton
+
+local abStroke = Instance.new("UIStroke")
+abStroke.Color = Color3.fromRGB(255, 60, 60)
+abStroke.Thickness = 2
+abStroke.Transparency = 0.5
+abStroke.Parent = aimButton
+
+local function updateAimButtonVisual()
+    if AIM_ACTIVE then
+        aimButton.BackgroundColor3 = Color3.fromRGB(255, 60, 60)
+        aimButton.BackgroundTransparency = 0.1
+        aimButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+        abStroke.Transparency = 0
+        aimButton.Text = "AIM\nON"
+    else
+        aimButton.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+        aimButton.BackgroundTransparency = 0.25
+        aimButton.TextColor3 = Color3.fromRGB(200, 200, 200)
+        abStroke.Transparency = 0.5
+        aimButton.Text = "AIM\nOFF"
+    end
+end
+
+do
+    local dragging = false
+    local didMove = false
+    local dragStart, startPos
+
+    aimButton.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+           or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            didMove = false
+            dragStart = input.Position
+            startPos = aimButton.Position
+        end
+    end)
+
+    track(UserInputService.InputChanged:Connect(function(input)
+        if not dragging then return end
+        if input.UserInputType == Enum.UserInputType.MouseMovement
+           or input.UserInputType == Enum.UserInputType.Touch then
+            local delta = input.Position - dragStart
+            if math.abs(delta.X) + math.abs(delta.Y) > 6 then didMove = true end
+            if didMove then
+                aimButton.Position = UDim2.new(
+                    startPos.X.Scale, startPos.X.Offset + delta.X,
+                    startPos.Y.Scale, startPos.Y.Offset + delta.Y
+                )
+            end
+        end
+    end))
+
+    aimButton.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+           or input.UserInputType == Enum.UserInputType.Touch then
+            if not didMove then
+                AIM_ACTIVE = not AIM_ACTIVE
+                updateAimButtonVisual()
+            end
+            dragging = false
+            didMove = false
+        end
+    end)
+end
+
+updateAimButtonVisual()
+
+track(UserInputService.InputBegan:Connect(function(input, gpe)
+    if gpe then return end
+    if _G.__espKill.dead then return end
+    if input.KeyCode == Enum.KeyCode.V then
+        AIM_ACTIVE = not AIM_ACTIVE
+        updateAimButtonVisual()
+    end
+end))
+
+if IS_MOBILE then
+    local mbGui = Instance.new("ScreenGui")
+    mbGui.Name = "ESP_MenuBtn"
+    mbGui.IgnoreGuiInset = true
+    mbGui.ResetOnSpawn = false
+    mbGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+    _G.__espMenuBtn = mbGui
+
+    local mb = Instance.new("TextButton")
+    mb.Size = UDim2.new(0, 44, 0, 44)
+    mb.Position = UDim2.new(0, 16, 0, 60)
+    mb.BackgroundColor3 = BG_DARK
+    mb.BackgroundTransparency = 0.25
+    mb.Text = "≡"
+    mb.TextColor3 = TEXT_MAIN
+    mb.Font = Enum.Font.GothamBold
+    mb.TextSize = 22
+    mb.BorderSizePixel = 0
+    mb.AutoButtonColor = false
+    mb.Parent = mbGui
+
+    local mbc = Instance.new("UICorner")
+    mbc.CornerRadius = UDim.new(1, 0)
+    mbc.Parent = mb
+
+    local mbs = Instance.new("UIStroke")
+    mbs.Color = ACCENT
+    mbs.Thickness = 2
+    mbs.Transparency = 0.3
+    mbs.Parent = mb
+
+    mb.MouseButton1Click:Connect(function()
+        main.Visible = not main.Visible
+    end)
+end
+
+sidebar = Instance.new("Frame")
+sidebar.Size = UDim2.new(0, 110, 1, -30)
+sidebar.Position = UDim2.new(0, 0, 0, 30)
+sidebar.BackgroundColor3 = BG_SIDEBAR
+sidebar.BorderSizePixel = 0
+sidebar.Parent = main
+
+local sidePad = Instance.new("UIPadding")
+sidePad.PaddingTop = UDim.new(0, 8)
+sidePad.PaddingLeft = UDim.new(0, 6)
+sidePad.PaddingRight = UDim.new(0, 6)
+sidePad.Parent = sidebar
+
+local sideLayout = Instance.new("UIListLayout")
+sideLayout.Padding = UDim.new(0, 4)
+sideLayout.SortOrder = Enum.SortOrder.LayoutOrder
+sideLayout.Parent = sidebar
+
+content = Instance.new("Frame")
+content.Size = UDim2.new(1, -110, 1, -30)
+content.Position = UDim2.new(0, 110, 0, 30)
+content.BackgroundTransparency = 1
+content.Parent = main
+
+local contentPad = Instance.new("UIPadding")
+contentPad.PaddingTop = UDim.new(0, 8)
+contentPad.PaddingBottom = UDim.new(0, 8)
+contentPad.PaddingLeft = UDim.new(0, 8)
+contentPad.PaddingRight = UDim.new(0, 8)
+contentPad.Parent = content
+
+local pages = {}
+local function makePage(name)
+    local p = Instance.new("ScrollingFrame")
+    p.Name = name
+    p.Size = UDim2.new(1, 0, 1, 0)
+    p.BackgroundTransparency = 1
+    p.BorderSizePixel = 0
+    p.ScrollBarThickness = 3
+    p.ScrollBarImageColor3 = STROKE_COL
+    p.CanvasSize = UDim2.new(0, 0, 0, 0)
+    p.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    p.Visible = false
+    p.Parent = content
+    local l = Instance.new("UIListLayout")
+    l.Padding = UDim.new(0, 6)
+    l.SortOrder = Enum.SortOrder.LayoutOrder
+    l.Parent = p
+    pages[name] = p
+    return p
+end
+
+local function addSection(parent, text)
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, 0, 0, 18)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = string.upper(text)
+    lbl.TextColor3 = ACCENT
+    lbl.Font = Enum.Font.GothamBold
+    lbl.TextSize = 10
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Parent = parent
+    return lbl
+end
+
+local function addToggle(parent, name, initial, callback)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, 30)
+    row.BackgroundColor3 = BG_ROW
+    row.BorderSizePixel = 0
+    row.Parent = parent
+    local rc = Instance.new("UICorner")
+    rc.CornerRadius = UDim.new(0, 5)
+    rc.Parent = row
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, -70, 1, 0)
+    lbl.Position = UDim2.new(0, 12, 0, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = name
+    lbl.TextColor3 = TEXT_MAIN
+    lbl.Font = Enum.Font.Gotham
+    lbl.TextSize = 12
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Parent = row
+
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(0, 40, 0, 18)
+    btn.Position = UDim2.new(1, -50, 0.5, -9)
+    btn.BackgroundColor3 = initial and ACCENT or Color3.fromRGB(45, 45, 55)
+    btn.BorderSizePixel = 0
+    btn.Text = ""
+    btn.AutoButtonColor = false
+    btn.Parent = row
+
+    local bc = Instance.new("UICorner")
+    bc.CornerRadius = UDim.new(0, 9)
+    bc.Parent = btn
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0, 14, 0, 14)
+    knob.Position = initial and UDim2.new(1, -16, 0.5, -7) or UDim2.new(0, 2, 0.5, -7)
+    knob.BackgroundColor3 = Color3.fromRGB(240, 240, 240)
+    knob.BorderSizePixel = 0
+    knob.Parent = btn
+
+    local kc = Instance.new("UICorner")
+    kc.CornerRadius = UDim.new(1, 0)
+    kc.Parent = knob
+
+    local state = initial
+    btn.MouseButton1Click:Connect(function()
+        state = not state
+        btn.BackgroundColor3 = state and ACCENT or Color3.fromRGB(45, 45, 55)
+        knob.Position = state and UDim2.new(1, -16, 0.5, -7) or UDim2.new(0, 2, 0.5, -7)
+        if callback then callback(state) end
+    end)
+
+    return row
+end
+
+local function addSlider(parent, name, min, max, initial, isFloat, callback)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, 38)
+    row.BackgroundColor3 = BG_ROW
+    row.BorderSizePixel = 0
+    row.Parent = parent
+    local rc = Instance.new("UICorner")
+    rc.CornerRadius = UDim.new(0, 5)
+    rc.Parent = row
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, -60, 0, 16)
+    lbl.Position = UDim2.new(0, 12, 0, 3)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = name
+    lbl.TextColor3 = TEXT_MAIN
+    lbl.Font = Enum.Font.Gotham
+    lbl.TextSize = 11
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Parent = row
+
+    local valLbl = Instance.new("TextLabel")
+    valLbl.Size = UDim2.new(0, 55, 0, 16)
+    valLbl.Position = UDim2.new(1, -67, 0, 3)
+    valLbl.BackgroundTransparency = 1
+    valLbl.Text = isFloat and string.format("%.2f", initial) or tostring(initial)
+    valLbl.TextColor3 = ACCENT
+    valLbl.Font = Enum.Font.GothamBold
+    valLbl.TextSize = 11
+    valLbl.TextXAlignment = Enum.TextXAlignment.Right
+    valLbl.Parent = row
+
+    local st = Instance.new("Frame")
+    st.Size = UDim2.new(1, -24, 0, 5)
+    st.Position = UDim2.new(0, 12, 0, 26)
+    st.BackgroundColor3 = Color3.fromRGB(40, 40, 48)
+    st.BorderSizePixel = 0
+    st.Parent = row
+
+    local tc = Instance.new("UICorner")
+    tc.CornerRadius = UDim.new(1, 0)
+    tc.Parent = st
+
+    local fill = Instance.new("Frame")
+    fill.Size = UDim2.new(0, 0, 1, 0)
+    fill.BackgroundColor3 = ACCENT
+    fill.BorderSizePixel = 0
+    fill.Parent = st
+
+    local fc = Instance.new("UICorner")
+    fc.CornerRadius = UDim.new(1, 0)
+    fc.Parent = fill
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0, 12, 0, 12)
+    knob.AnchorPoint = Vector2.new(0.5, 0.5)
+    knob.Position = UDim2.new(0, 0, 0.5, 0)
+    knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    knob.BorderSizePixel = 0
+    knob.ZIndex = 2
+    knob.Parent = st
+
+    local kc = Instance.new("UICorner")
+    kc.CornerRadius = UDim.new(1, 0)
+    kc.Parent = knob
+
+    local value = initial
+    local dragging = false
+
+    local function setValue(v)
+        value = math.clamp(v, min, max)
+        local alpha = (value - min) / (max - min)
+        fill.Size = UDim2.new(alpha, 0, 1, 0)
+        knob.Position = UDim2.new(alpha, 0, 0.5, 0)
+        valLbl.Text = isFloat and string.format("%.2f", value) or tostring(math.floor(value + 0.5))
+        if callback then callback(value) end
+    end
+    setValue(initial)
+
+    local function upd(inp)
+        local absPos = st.AbsolutePosition.X
+        local absSize = st.AbsoluteSize.X
+        if absSize <= 0 then return end
+        local alpha = math.clamp((inp.Position.X - absPos) / absSize, 0, 1)
+        setValue(min + (max - min) * alpha)
+    end
+
+    st.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+           or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            upd(input)
+        end
+    end)
+
+    track(UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+           or input.UserInputType == Enum.UserInputType.Touch) then
+            upd(input)
+        end
+    end))
+
+    track(UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+           or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end))
+
+    return row
+end
+
+local function makeTab(name, pageName)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, 0, 0, 28)
+    btn.BackgroundColor3 = BG_ROW
+    btn.BackgroundTransparency = 1
+    btn.Text = "  " .. name
+    btn.TextColor3 = TEXT_DIM
+    btn.Font = Enum.Font.GothamMedium
+    btn.TextSize = 12
+    btn.TextXAlignment = Enum.TextXAlignment.Left
+    btn.BorderSizePixel = 0
+    btn.AutoButtonColor = false
+    btn.Parent = sidebar
+
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, 4)
+    c.Parent = btn
+
+    local indicator = Instance.new("Frame")
+    indicator.Size = UDim2.new(0, 2, 0, 14)
+    indicator.Position = UDim2.new(0, 0, 0.5, -7)
+    indicator.BackgroundColor3 = ACCENT
+    indicator.BorderSizePixel = 0
+    indicator.Visible = false
+    indicator.Parent = btn
+
+    local ic = Instance.new("UICorner")
+    ic.CornerRadius = UDim.new(1, 0)
+    ic.Parent = indicator
+
+    btn.MouseButton1Click:Connect(function()
+        for _, p in pairs(pages) do p.Visible = false end
+        for _, sib in ipairs(sidebar:GetChildren()) do
+            if sib:IsA("TextButton") then
+                sib.BackgroundTransparency = 1
+                sib.TextColor3 = TEXT_DIM
+                local ind = sib:FindFirstChildOfClass("Frame")
+                if ind then ind.Visible = false end
+            end
+        end
+        if pages[pageName] then pages[pageName].Visible = true end
+        btn.BackgroundTransparency = 0
+        btn.TextColor3 = TEXT_MAIN
+        indicator.Visible = true
+    end)
+
+    return btn
+end
+
+local pageVisual  = makePage("Visual")
+local pageBox     = makePage("BoxHP")
+local pageTracers = makePage("Tracers")
+local pageAlert   = makePage("Alert")
+local pageAim     = makePage("Aim")
+local pageUI      = makePage("UI")
+
+addSection(pageVisual, "Highlight")
+addToggle(pageVisual, "ESP Enabled", ESP_ENABLED, function(v)
+    ESP_ENABLED = v
+    if v then enableAllESP() else disableAllESP() end
+end)
+addToggle(pageVisual, "Visibility Check", VISIBILITY_ENABLED, function(v) VISIBILITY_ENABLED = v end)
+addToggle(pageVisual, "Team Check", CONFIG.ESP_TeamCheck, function(v)
+    CONFIG.ESP_TeamCheck = v
+    for _, p in ipairs(Players:GetPlayers()) do addHighlightsFor(p) end
+end)
+addToggle(pageVisual, "Use Highlight", CONFIG.UseHighlight, function(v)
+    CONFIG.UseHighlight = v
+    for _, p in ipairs(Players:GetPlayers()) do addHighlightsFor(p) end
+end)
+addSlider(pageVisual, "Fill Transparency", 0, 1, CONFIG.Transparency, true, function(v)
+    CONFIG.Transparency = v
+    applyHighlightStyles()
+end)
+
+addSection(pageBox, "Box (Drawing)")
+addToggle(pageBox, "Box Enabled", CONFIG.BoxEnabled, function(v) CONFIG.BoxEnabled = v end)
+addSlider(pageBox, "Box Thickness", 1, 5, CONFIG.BoxThickness, false, function(v)
+    CONFIG.BoxThickness = math.floor(v + 0.5)
+end)
+addSlider(pageBox, "Box Transparency", 0, 1, CONFIG.BoxTransparency, true, function(v)
+    CONFIG.BoxTransparency = v
+end)
+addSlider(pageBox, "Box Width Ratio", 0.3, 0.9, CONFIG.BoxWidthRatio, true, function(v)
+    CONFIG.BoxWidthRatio = v
+end)
+
+addSection(pageBox, "HP Bar (над боксом)")
+addToggle(pageBox, "HP Bar Enabled", CONFIG.HPBarEnabled, function(v) CONFIG.HPBarEnabled = v end)
+addToggle(pageBox, "HP Text Enabled", CONFIG.HPTextEnabled, function(v) CONFIG.HPTextEnabled = v end)
+addSlider(pageBox, "HP Transparency", 0, 1, CONFIG.HPTransparency, true, function(v)
+    CONFIG.HPTransparency = v
+end)
+addSlider(pageBox, "HP Bar Height", 2, 10, CONFIG.HPBarHeight, false, function(v)
+    CONFIG.HPBarHeight = math.floor(v + 0.5)
+end)
+
+addSection(pageBox, "Distance (под боксом)")
+addToggle(pageBox, "Distance Enabled", CONFIG.DistTextEnabled, function(v) CONFIG.DistTextEnabled = v end)
+
+addSection(pageTracers, "Tracer Lines")
+addToggle(pageTracers, "Tracers Enabled", CONFIG.TracerEnabled, function(v)
+    CONFIG.TracerEnabled = v
+    if not v then
+        for _, line in pairs(tracers) do pcall(function() line.Visible = false end) end
+    end
+end)
+addToggle(pageTracers, "From Bottom", CONFIG.TracerFromBottom, function(v) CONFIG.TracerFromBottom = v end)
+addSlider(pageTracers, "Thickness", 1, 6, CONFIG.TracerThickness, false, function(v)
+    CONFIG.TracerThickness = math.floor(v + 0.5)
+    applyTracerStyles()
+end)
+addSlider(pageTracers, "Transparency", 0, 1, CONFIG.TracerTransparency, true, function(v)
+    CONFIG.TracerTransparency = v
+    applyTracerStyles()
+end)
+
+addSection(pageAlert, "Back Alert")
+addToggle(pageAlert, "Alert Enabled", CONFIG.BackAlertEnabled, function(v) CONFIG.BackAlertEnabled = v end)
+addSlider(pageAlert, "Marker Size", 6, 40, CONFIG.BackAlertSize, false, function(v)
+    CONFIG.BackAlertSize = math.floor(v + 0.5)
+    applyAlertStyles()
+end)
+addSlider(pageAlert, "Stroke Thickness", 0, 5, CONFIG.BackAlertStroke, false, function(v)
+    CONFIG.BackAlertStroke = math.floor(v + 0.5)
+    applyAlertStyles()
+end)
+addSlider(pageAlert, "Radius X", 0.05, 0.60, CONFIG.BackAlertRadiusX, true, function(v) CONFIG.BackAlertRadiusX = v end)
+addSlider(pageAlert, "Radius Y", 0.05, 0.60, CONFIG.BackAlertRadiusY, true, function(v) CONFIG.BackAlertRadiusY = v end)
+
+addSection(pageAim, "Aimbot (V / кнопка)")
+addToggle(pageAim, "Aim Enabled", CONFIG.AimEnabled, function(v) CONFIG.AimEnabled = v end)
+addToggle(pageAim, "Team Check", CONFIG.Aim_TeamCheck, function(v) CONFIG.Aim_TeamCheck = v end)
+addToggle(pageAim, "Visible Only", CONFIG.AimVisibleOnly, function(v) CONFIG.AimVisibleOnly = v end)
+addToggle(pageAim, "Draw FOV", CONFIG.AimDrawFOV, function(v) CONFIG.AimDrawFOV = v end)
+addSlider(pageAim, "FOV", 20, 500, CONFIG.AimFOV, false, function(v)
+    CONFIG.AimFOV = math.floor(v + 0.5)
+    applyFOVStyle()
+end)
+addSlider(pageAim, "Smoothness", 0, 0.9, CONFIG.AimSmoothness, true, function(v)
+    CONFIG.AimSmoothness = v
+end)
+addSlider(pageAim, "Prediction", 0, 0.5, CONFIG.AimPrediction, true, function(v)
+    CONFIG.AimPrediction = v
+end)
+
+addSection(pageUI, "Interface")
+addSlider(pageUI, "Menu Scale", 0.7, 1.5, CONFIG.UIScale, true, function(v)
+    CONFIG.UIScale = v
+    uiScale.Scale = v
+end)
+addSlider(pageUI, "Visibility Rate", 0.02, 0.20, CONFIG.VisibilityCheckRate, true, function(v)
+    CONFIG.VisibilityCheckRate = v
+end)
+
+makeTab("Visual",  "Visual")
+makeTab("Box & HP", "BoxHP")
+makeTab("Tracers", "Tracers")
+makeTab("Alert",   "Alert")
+makeTab("Aim",     "Aim")
+makeTab("UI",      "UI")
+
+pages["Visual"].Visible = true
+for _, sib in ipairs(sidebar:GetChildren()) do
+    if sib:IsA("TextButton") then
+        local ind = sib:FindFirstChildOfClass("Frame")
+        if ind then
+            sib.BackgroundTransparency = 0
+            sib.TextColor3 = TEXT_MAIN
+            ind.Visible = true
+        end
+        break
+    end
+end
+
+_G.__espKill.keybind = UserInputService.InputBegan:Connect(function(input, gpe)
+    if gpe then return end
+    if _G.__espKill.dead then return end
+    if input.KeyCode == Enum.KeyCode.RightShift then
+        main.Visible = not main.Visible
+    end
+end)
