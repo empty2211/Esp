@@ -64,7 +64,6 @@ local CONFIG = {
     BackAlertRadiusX = 0.20,
     BackAlertRadiusY = 0.20,
 
-    -- Обновленные настройки Box & HP
     BoxEnabled = true,
     BoxThickness = 1,
     BoxTransparency = 0.50,
@@ -844,7 +843,7 @@ local tbAccentCorner = Instance.new("UICorner"); tbAccentCorner.CornerRadius = U
 
 local titleLabel = Instance.new("TextLabel")
 titleLabel.Size = UDim2.new(1, -130, 1, 0); titleLabel.Position = UDim2.new(0, 22, 0, 0); titleLabel.BackgroundTransparency = 1
-titleLabel.Text = "ESP HUB v4.7"; titleLabel.TextColor3 = TEXT_MAIN; titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+titleLabel.Text = "ESP HUB v4.8"; titleLabel.TextColor3 = TEXT_MAIN; titleLabel.TextXAlignment = Enum.TextXAlignment.Left
 titleLabel.Font = Enum.Font.GothamBold; titleLabel.TextSize = CONFIG.UI_TextSize; titleLabel.TextTransparency = CONFIG.UI_TextTrans; titleLabel.Parent = titleBar
 
 local hintLabel = Instance.new("TextLabel")
@@ -1143,7 +1142,8 @@ local pageBox     = makePage("BoxHP")
 local pageTracers = makePage("Tracers")
 local pageAlert   = makePage("Alert")
 local pageAim     = makePage("Aim")
-local pageUI      = makePage("UI")
+local pageColors  = makePage("UI_Colors")
+local pageUI      = makePage("UI_Settings")
 
 addSection(pageVisual, "Highlight")
 addToggle(pageVisual, "ESP Enabled", ESP_ENABLED, function(v)
@@ -1299,15 +1299,15 @@ local function applyUITheme()
     end
 end
 
--- ACCENT COLOR PICKER
-addSection(pageUI, "Accent Color")
+-- ACCENT COLOR PICKER (Page: UI_Colors)
+addSection(pageColors, "Accent Color")
 
 local inputContainer = Instance.new("Frame")
 inputContainer.Size = UDim2.new(1, 0, 0, 66)
 inputContainer.BackgroundColor3 = Color3.fromRGB(26, 26, 32)
 inputContainer.BackgroundTransparency = math.min(1, CONFIG.UI_BgTrans + 0.05)
 inputContainer.BorderSizePixel = 0
-inputContainer.Parent = pageUI
+inputContainer.Parent = pageColors
 local icCorner = Instance.new("UICorner"); icCorner.CornerRadius = UDim.new(0, 5); icCorner.Parent = inputContainer
 
 local rgbBox = Instance.new("TextBox")
@@ -1353,7 +1353,7 @@ pickerFrame.Position = UDim2.new(0.5, -pickerSize/2, 0, 5)
 pickerFrame.BackgroundTransparency = 1
 pickerFrame.ClipsDescendants = true
 pickerFrame.Visible = false
-pickerFrame.Parent = pageUI
+pickerFrame.Parent = pageColors
 
 local pickerCorner = Instance.new("UICorner")
 pickerCorner.CornerRadius = UDim.new(1, 0)
@@ -1438,7 +1438,7 @@ hexBox.FocusLost:Connect(function()
     hexBox.Text = rgbToHex(CONFIG.UI_Accent)
 end)
 
-local briRow, briSet = addSlider(pageUI, "Accent Brightness", 0, 1, CONFIG.UI_Value, true, function(v)
+local briRow, briSet = addSlider(pageColors, "Accent Brightness", 0, 1, CONFIG.UI_Value, true, function(v)
     CONFIG.UI_Value = v
     local h, s, _ = Color3.toHSV(CONFIG.UI_Accent)
     CONFIG.UI_Accent = Color3.fromHSV(h, s, v)
@@ -1448,15 +1448,15 @@ local briRow, briSet = addSlider(pageUI, "Accent Brightness", 0, 1, CONFIG.UI_Va
 end)
 updateBrightnessSlider = briSet
 
--- BACKGROUND COLOR PICKER
-addSection(pageUI, "Background Color")
+-- BACKGROUND COLOR PICKER (Page: UI_Colors)
+addSection(pageColors, "Background Color")
 
 local bgInputContainer = Instance.new("Frame")
 bgInputContainer.Size = UDim2.new(1, 0, 0, 66)
 bgInputContainer.BackgroundColor3 = Color3.fromRGB(26, 26, 32)
 bgInputContainer.BackgroundTransparency = math.min(1, CONFIG.UI_BgTrans + 0.05)
 bgInputContainer.BorderSizePixel = 0
-bgInputContainer.Parent = pageUI
+bgInputContainer.Parent = pageColors
 local bgIcCorner = Instance.new("UICorner"); bgIcCorner.CornerRadius = UDim.new(0, 5); bgIcCorner.Parent = bgInputContainer
 
 local bgRgbBox = Instance.new("TextBox")
@@ -1501,7 +1501,7 @@ bgPickerFrame.Position = UDim2.new(0.5, -pickerSize/2, 0, 5)
 bgPickerFrame.BackgroundTransparency = 1
 bgPickerFrame.ClipsDescendants = true
 bgPickerFrame.Visible = false
-bgPickerFrame.Parent = pageUI
+bgPickerFrame.Parent = pageColors
 
 local bgPickerCorner = Instance.new("UICorner")
 bgPickerCorner.CornerRadius = UDim.new(1, 0)
@@ -1580,7 +1580,7 @@ bgHexBox.FocusLost:Connect(function()
     bgHexBox.Text = rgbToHex(CONFIG.UI_BgColor)
 end)
 
-local bgBriRow, bgBriSet = addSlider(pageUI, "Background Brightness", 0, 1, CONFIG.UI_BgValue, true, function(v)
+local bgBriRow, bgBriSet = addSlider(pageColors, "Background Brightness", 0, 1, CONFIG.UI_BgValue, true, function(v)
     CONFIG.UI_BgValue = v
     local h, s, _ = Color3.toHSV(CONFIG.UI_BgColor)
     CONFIG.UI_BgColor = Color3.fromHSV(h, s, v)
@@ -1590,7 +1590,7 @@ local bgBriRow, bgBriSet = addSlider(pageUI, "Background Brightness", 0, 1, CONF
 end)
 updateBgBrightness = bgBriSet
 
--- INTERFACE SETTINGS
+-- INTERFACE SETTINGS (Page: UI_Settings)
 addSection(pageUI, "Interface Settings")
 addSlider(pageUI, "Menu Opacity", 0, 1, CONFIG.UI_BgTrans, true, function(v) CONFIG.UI_BgTrans = v; applyUITheme() end)
 addSlider(pageUI, "Text Opacity", 0, 1, CONFIG.UI_TextTrans, true, function(v) CONFIG.UI_TextTrans = v; applyUITheme() end)
@@ -1612,7 +1612,8 @@ makeTab("Box & HP", "BoxHP")
 makeTab("Tracers", "Tracers")
 makeTab("Alert",   "Alert")
 makeTab("Aim",     "Aim")
-makeTab("UI",      "UI")
+makeTab("UI Colors", "UI_Colors")
+makeTab("UI Settings", "UI_Settings")
 
 pages["Visual"].Visible = true
 for _, sib in ipairs(sidebar:GetChildren()) do
@@ -1631,4 +1632,4 @@ _G.__espKill.keybind = UserInputService.InputBegan:Connect(function(input, gpe)
     if input.KeyCode == Enum.KeyCode.RightShift then main.Visible = not main.Visible end
 end)
 
-print("[ESP Hub] Загружено: v4.7 (Defaults updated)")
+print("[ESP Hub] Загружено: v4.8 (Split UI Colors & Settings)")
