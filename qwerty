@@ -88,6 +88,7 @@ local CONFIG = {
     UI_Accent = Color3.fromRGB(255, 60, 60),
     UI_Value = 1,
     UI_BgColor = Color3.fromRGB(12, 12, 16),
+    UI_BgValue = 1,
     UI_BgTrans = 0.0,
     UI_TextTrans = 0.0,
     UI_TextSize = 12,
@@ -837,7 +838,7 @@ local tbAccentCorner = Instance.new("UICorner"); tbAccentCorner.CornerRadius = U
 
 local titleLabel = Instance.new("TextLabel")
 titleLabel.Size = UDim2.new(1, -130, 1, 0); titleLabel.Position = UDim2.new(0, 22, 0, 0); titleLabel.BackgroundTransparency = 1
-titleLabel.Text = "ESP HUB v4.5"; titleLabel.TextColor3 = TEXT_MAIN; titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+titleLabel.Text = "ESP HUB v4.6"; titleLabel.TextColor3 = TEXT_MAIN; titleLabel.TextXAlignment = Enum.TextXAlignment.Left
 titleLabel.Font = Enum.Font.GothamBold; titleLabel.TextSize = CONFIG.UI_TextSize; titleLabel.TextTransparency = CONFIG.UI_TextTrans; titleLabel.Parent = titleBar
 
 local hintLabel = Instance.new("TextLabel")
@@ -1287,6 +1288,7 @@ local function applyUITheme()
     end
 end
 
+-- ACCENT COLOR PICKER
 addSection(pageUI, "Accent Color")
 
 local inputContainer = Instance.new("Frame")
@@ -1297,7 +1299,6 @@ inputContainer.BorderSizePixel = 0
 inputContainer.Parent = pageUI
 local icCorner = Instance.new("UICorner"); icCorner.CornerRadius = UDim.new(0, 5); icCorner.Parent = inputContainer
 
--- RGB Input
 local rgbBox = Instance.new("TextBox")
 rgbBox.Size = UDim2.new(1, -60, 0, 24)
 rgbBox.Position = UDim2.new(0, 10, 0, 10)
@@ -1307,12 +1308,9 @@ rgbBox.Text = "255, 60, 60"
 rgbBox.TextColor3 = Color3.fromRGB(255, 255, 255)
 rgbBox.Font = Enum.Font.Gotham
 rgbBox.TextSize = 12
-rgbBox.PlaceholderText = "RGB (255, 255, 255)"
 rgbBox.Parent = inputContainer
 local rgbCorner = Instance.new("UICorner"); rgbCorner.CornerRadius = UDim.new(0, 4); rgbCorner.Parent = rgbBox
-local rgbPad = Instance.new("UIPadding"); rgbPad.PaddingLeft = UDim.new(0, 8); rgbPad.Parent = rgbBox
 
--- HEX Input
 local hexBox = Instance.new("TextBox")
 hexBox.Size = UDim2.new(1, -60, 0, 24)
 hexBox.Position = UDim2.new(0, 10, 0, 38)
@@ -1322,12 +1320,9 @@ hexBox.Text = "#ff3c3c"
 hexBox.TextColor3 = Color3.fromRGB(255, 255, 255)
 hexBox.Font = Enum.Font.Gotham
 hexBox.TextSize = 12
-hexBox.PlaceholderText = "HEX (#ffffff)"
 hexBox.Parent = inputContainer
 local hexCorner = Instance.new("UICorner"); hexCorner.CornerRadius = UDim.new(0, 4); hexCorner.Parent = hexBox
-local hexPad = Instance.new("UIPadding"); hexPad.PaddingLeft = UDim.new(0, 8); hexPad.Parent = hexBox
 
--- Pipette Button
 local pipetteBtn = Instance.new("TextButton")
 pipetteBtn.Size = UDim2.new(0, 40, 0, 52)
 pipetteBtn.Position = UDim2.new(1, -50, 0, 10)
@@ -1340,7 +1335,6 @@ pipetteBtn.TextSize = 11
 pipetteBtn.Parent = inputContainer
 local pipCorner = Instance.new("UICorner"); pipCorner.CornerRadius = UDim.new(0, 4); pipCorner.Parent = pipetteBtn
 
--- Wheel Container
 local pickerSize = 180
 local pickerFrame = Instance.new("Frame")
 pickerFrame.Size = UDim2.new(0, pickerSize, 0, pickerSize)
@@ -1356,7 +1350,6 @@ pickerCorner.Parent = pickerFrame
 
 local updateBrightnessSlider = nil
 
--- Generate Wheel
 local gridRes = 30
 local cellSize = pickerSize / gridRes
 local colorCells = {}
@@ -1393,8 +1386,6 @@ for y = 0, gridRes - 1 do
                 rgbBox.Text = string.format("%d, %d, %d", math.floor(CONFIG.UI_Accent.R*255+0.5), math.floor(CONFIG.UI_Accent.G*255+0.5), math.floor(CONFIG.UI_Accent.B*255+0.5))
                 hexBox.Text = rgbToHex(CONFIG.UI_Accent)
                 applyUITheme()
-                
-                -- СКРЫВАЕМ КРУГ ПОСЛЕ ВЫБОРА ЦВЕТА
                 pickerFrame.Visible = false
             end)
             table.insert(colorCells, {btn = btn, h = h, s = s})
@@ -1412,10 +1403,7 @@ rgbBox.FocusLost:Connect(function()
         table.insert(nums, tonumber(num))
     end
     if #nums >= 3 then
-        local r = math.clamp(nums[1], 0, 255)
-        local g = math.clamp(nums[2], 0, 255)
-        local b = math.clamp(nums[3], 0, 255)
-        local c = Color3.fromRGB(r, g, b)
+        local c = Color3.fromRGB(math.clamp(nums[1], 0, 255), math.clamp(nums[2], 0, 255), math.clamp(nums[3], 0, 255))
         CONFIG.UI_Accent = c
         local h, s, v = Color3.toHSV(c)
         CONFIG.UI_Value = v
@@ -1439,7 +1427,7 @@ hexBox.FocusLost:Connect(function()
     hexBox.Text = rgbToHex(CONFIG.UI_Accent)
 end)
 
-local briRow, briSet = addSlider(pageUI, "Brightness", 0, 1, CONFIG.UI_Value, true, function(v)
+local briRow, briSet = addSlider(pageUI, "Accent Brightness", 0, 1, CONFIG.UI_Value, true, function(v)
     CONFIG.UI_Value = v
     local h, s, _ = Color3.toHSV(CONFIG.UI_Accent)
     CONFIG.UI_Accent = Color3.fromHSV(h, s, v)
@@ -1449,6 +1437,149 @@ local briRow, briSet = addSlider(pageUI, "Brightness", 0, 1, CONFIG.UI_Value, tr
 end)
 updateBrightnessSlider = briSet
 
+-- BACKGROUND COLOR PICKER
+addSection(pageUI, "Background Color")
+
+local bgInputContainer = Instance.new("Frame")
+bgInputContainer.Size = UDim2.new(1, 0, 0, 66)
+bgInputContainer.BackgroundColor3 = Color3.fromRGB(26, 26, 32)
+bgInputContainer.BackgroundTransparency = math.min(1, CONFIG.UI_BgTrans + 0.05)
+bgInputContainer.BorderSizePixel = 0
+bgInputContainer.Parent = pageUI
+local bgIcCorner = Instance.new("UICorner"); bgIcCorner.CornerRadius = UDim.new(0, 5); bgIcCorner.Parent = bgInputContainer
+
+local bgRgbBox = Instance.new("TextBox")
+bgRgbBox.Size = UDim2.new(1, -60, 0, 24)
+bgRgbBox.Position = UDim2.new(0, 10, 0, 10)
+bgRgbBox.BackgroundColor3 = Color3.fromRGB(40, 40, 48)
+bgRgbBox.BorderSizePixel = 0
+bgRgbBox.Text = "12, 12, 16"
+bgRgbBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+bgRgbBox.Font = Enum.Font.Gotham
+bgRgbBox.TextSize = 12
+bgRgbBox.Parent = bgInputContainer
+local bgRgbCorner = Instance.new("UICorner"); bgRgbCorner.CornerRadius = UDim.new(0, 4); bgRgbCorner.Parent = bgRgbBox
+
+local bgHexBox = Instance.new("TextBox")
+bgHexBox.Size = UDim2.new(1, -60, 0, 24)
+bgHexBox.Position = UDim2.new(0, 10, 0, 38)
+bgHexBox.BackgroundColor3 = Color3.fromRGB(40, 40, 48)
+bgHexBox.BorderSizePixel = 0
+bgHexBox.Text = "#0c0c10"
+bgHexBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+bgHexBox.Font = Enum.Font.Gotham
+bgHexBox.TextSize = 12
+bgHexBox.Parent = bgInputContainer
+local bgHexCorner = Instance.new("UICorner"); bgHexCorner.CornerRadius = UDim.new(0, 4); bgHexCorner.Parent = bgHexBox
+
+local bgPickBtn = Instance.new("TextButton")
+bgPickBtn.Size = UDim2.new(0, 40, 0, 52)
+bgPickBtn.Position = UDim2.new(1, -50, 0, 10)
+bgPickBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 48)
+bgPickBtn.BorderSizePixel = 0
+bgPickBtn.Text = "Pick"
+bgPickBtn.TextColor3 = CONFIG.UI_Accent
+bgPickBtn.Font = Enum.Font.GothamBold
+bgPickBtn.TextSize = 11
+bgPickBtn.Parent = bgInputContainer
+local bgPickCorner = Instance.new("UICorner"); bgPickCorner.CornerRadius = UDim.new(0, 4); bgPickCorner.Parent = bgPickBtn
+
+local bgPickerFrame = Instance.new("Frame")
+bgPickerFrame.Size = UDim2.new(0, pickerSize, 0, pickerSize)
+bgPickerFrame.Position = UDim2.new(0.5, -pickerSize/2, 0, 5)
+bgPickerFrame.BackgroundTransparency = 1
+bgPickerFrame.ClipsDescendants = true
+bgPickerFrame.Visible = false
+bgPickerFrame.Parent = pageUI
+
+local bgPickerCorner = Instance.new("UICorner")
+bgPickerCorner.CornerRadius = UDim.new(1, 0)
+bgPickerCorner.Parent = bgPickerFrame
+
+local updateBgBrightness = nil
+
+for y = 0, gridRes - 1 do
+    for x = 0, gridRes - 1 do
+        local dx = x - maxDist
+        local dy = y - maxDist
+        local dist = math.sqrt(dx*dx + dy*dy)
+
+        if dist <= maxDist + 0.5 then
+            local btn = Instance.new("TextButton")
+            btn.Size = UDim2.new(0, cellSize + 1, 0, cellSize + 1) 
+            btn.Position = UDim2.new(0, x * cellSize - 0.5, 0, y * cellSize - 0.5)
+            btn.Text = ""
+            btn.BorderSizePixel = 0
+            
+            local btnCorner = Instance.new("UICorner")
+            btnCorner.CornerRadius = UDim.new(1, 0)
+            btnCorner.Parent = btn
+
+            local h = (math.atan2(dy, dx) / (2 * math.pi)) % 1
+            local s = math.clamp(dist / maxDist, 0, 1)
+            
+            btn.BackgroundColor3 = Color3.fromHSV(h, s, 1) 
+            btn.Parent = bgPickerFrame
+            btn.MouseButton1Click:Connect(function()
+                if CONFIG.UI_BgValue < 0.05 then
+                    CONFIG.UI_BgValue = 1
+                    if updateBgBrightness then updateBgBrightness(1) end
+                end
+                CONFIG.UI_BgColor = Color3.fromHSV(h, s, CONFIG.UI_BgValue)
+                bgRgbBox.Text = string.format("%d, %d, %d", math.floor(CONFIG.UI_BgColor.R*255+0.5), math.floor(CONFIG.UI_BgColor.G*255+0.5), math.floor(CONFIG.UI_BgColor.B*255+0.5))
+                bgHexBox.Text = rgbToHex(CONFIG.UI_BgColor)
+                applyUITheme()
+                bgPickerFrame.Visible = false
+            end)
+        end
+    end
+end
+
+bgPickBtn.MouseButton1Click:Connect(function()
+    bgPickerFrame.Visible = not bgPickerFrame.Visible
+end)
+
+bgRgbBox.FocusLost:Connect(function()
+    local nums = {}
+    for num in string.gmatch(bgRgbBox.Text, "%d+") do
+        table.insert(nums, tonumber(num))
+    end
+    if #nums >= 3 then
+        local c = Color3.fromRGB(math.clamp(nums[1], 0, 255), math.clamp(nums[2], 0, 255), math.clamp(nums[3], 0, 255))
+        CONFIG.UI_BgColor = c
+        local h, s, v = Color3.toHSV(c)
+        CONFIG.UI_BgValue = v
+        if updateBgBrightness then updateBgBrightness(v) end
+        bgHexBox.Text = rgbToHex(c)
+        applyUITheme()
+    end
+    bgRgbBox.Text = string.format("%d, %d, %d", math.floor(CONFIG.UI_BgColor.R*255+0.5), math.floor(CONFIG.UI_BgColor.G*255+0.5), math.floor(CONFIG.UI_BgColor.B*255+0.5))
+end)
+
+bgHexBox.FocusLost:Connect(function()
+    local c = hexToRgb(bgHexBox.Text)
+    if c then
+        CONFIG.UI_BgColor = c
+        local h, s, v = Color3.toHSV(c)
+        CONFIG.UI_BgValue = v
+        if updateBgBrightness then updateBgBrightness(v) end
+        bgRgbBox.Text = string.format("%d, %d, %d", math.floor(c.R*255+0.5), math.floor(c.G*255+0.5), math.floor(c.B*255+0.5))
+        applyUITheme()
+    end
+    bgHexBox.Text = rgbToHex(CONFIG.UI_BgColor)
+end)
+
+local bgBriRow, bgBriSet = addSlider(pageUI, "Background Brightness", 0, 1, CONFIG.UI_BgValue, true, function(v)
+    CONFIG.UI_BgValue = v
+    local h, s, _ = Color3.toHSV(CONFIG.UI_BgColor)
+    CONFIG.UI_BgColor = Color3.fromHSV(h, s, v)
+    bgRgbBox.Text = string.format("%d, %d, %d", math.floor(CONFIG.UI_BgColor.R*255+0.5), math.floor(CONFIG.UI_BgColor.G*255+0.5), math.floor(CONFIG.UI_BgColor.B*255+0.5))
+    bgHexBox.Text = rgbToHex(CONFIG.UI_BgColor)
+    applyUITheme()
+end)
+updateBgBrightness = bgBriSet
+
+-- INTERFACE SETTINGS
 addSection(pageUI, "Interface Settings")
 addSlider(pageUI, "Menu Opacity", 0, 1, CONFIG.UI_BgTrans, true, function(v) CONFIG.UI_BgTrans = v; applyUITheme() end)
 addSlider(pageUI, "Text Opacity", 0, 1, CONFIG.UI_TextTrans, true, function(v) CONFIG.UI_TextTrans = v; applyUITheme() end)
@@ -1489,4 +1620,4 @@ _G.__espKill.keybind = UserInputService.InputBegan:Connect(function(input, gpe)
     if input.KeyCode == Enum.KeyCode.RightShift then main.Visible = not main.Visible end
 end)
 
-print("[ESP Hub] Загружено: v4.5 (Stable RGB/HEX)")
+print("[ESP Hub] Загружено: v4.6 (Stable RGB/HEX + BgColor)")
