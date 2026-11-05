@@ -1,0 +1,1635 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+local Camera = Workspace.CurrentCamera
+local LocalPlayer = Players.LocalPlayer
+
+-- СБРОС состояния предыдущего запуска
+if _G.__espKill then
+    if _G.__espKill.connections then
+        for _, c in ipairs(_G.__espKill.connections) do
+            pcall(function() c:Disconnect() end)
+        end
+    end
+    pcall(function() RunService:UnbindFromRenderStep("ESP_Render") end)
+    pcall(function() RunService:UnbindFromRenderStep("AIM_Render") end)
+    local lp = Players.LocalPlayer
+    local pg = lp and lp:FindFirstChild("PlayerGui")
+    if pg then
+        for _, name in ipairs({"ESP_Hub", "ESP_BackAlert", "ESP_AimFOV", "ESP_AimBtn", "ESP_MenuBtn"}) do
+            local g = pg:FindFirstChild(name)
+            if g then pcall(function() g:Destroy() end) end
+        end
+    end
+    pcall(function()
+        if Drawing and Drawing.clear then Drawing.clear() end
+    end)
+end
+
+_G.__espKill = { dead = false, connections = {} }
+local function track(conn)
+    table.insert(_G.__espKill.connections, conn)
+    return conn
+end
+
+local CONFIG = {
+    VisibleColor = Color3.fromRGB(255, 0, 0),
+    HiddenColor  = Color3.fromRGB(0, 255, 0),
+    OutlineColor = Color3.fromRGB(255, 255, 255),
+    Transparency = 0.35,
+    OutlineTransparency = 0,
+    ShowDead = true,
+
+    ESP_TeamCheck = false,
+    Aim_TeamCheck = false,
+    
+    TeamColorESP = false,
+
+    UseHighlight = true,
+    UseSelectionBox = false,
+
+    TracerEnabled = true,
+    TracerTransparency = 0.6,
+    TracerThickness = 1,
+    TracerFromBottom = true,
+
+    VisibilityCheckRate = 0.05,
+    CheckHeadOnly = true,
+
+    BackAlertEnabled = true,
+    BackAlertColor = Color3.fromRGB(255, 200, 0),
+    BackAlertSize = 16,
+    BackAlertStroke = 2,
+    BackAlertRadiusX = 0.20,
+    BackAlertRadiusY = 0.20,
+
+    BoxEnabled = true,
+    BoxThickness = 1,
+    BoxTransparency = 0.50,
+    BoxWidthRatio = 0.89,
+
+    HPBarEnabled = true,
+    HPTextEnabled = true,
+    HPTransparency = 0.80,
+    HPBarHeight = 2,
+
+    DistTextEnabled = true,
+
+    AimEnabled = true,
+    AimFOV = 150,
+    AimSmoothness = 0.25,
+    AimTargetPart = "Head",
+    AimVisibleOnly = false,
+    AimPrediction = 0.15,
+    AimDrawFOV = true,
+
+    -- UI Customization
+    UI_Accent = Color3.fromRGB(255, 255, 255),
+    UI_Value = 1,
+    UI_BgColor = Color3.fromRGB(0, 0, 0),
+    UI_BgValue = 0,
+    UI_BgTrans = 0.20,
+    UI_TextTrans = 0.0,
+    UI_TextSize = 12,
+}
+
+-- Цвета для переключателей (как на референсе)
+local TOGGLE_ON_COLOR = Color3.fromRGB(0, 200, 0)
+local TOGGLE_OFF_COLOR = Color3.fromRGB(100, 100, 100)
+local TOGGLE_KNOB_COLOR = Color3.fromRGB(255, 255, 255)
+
+local ESP_ENABLED = true
+local VISIBILITY_ENABLED = true
+local AIM_ACTIVE = false
+local IS_MOBILE = not UserInputService.MouseEnabled
+
+local highlights = {}
+local tracers = {}
+local visibility = {}
+local espObjects = {}
+
+-- УНИВЕРСАЛЬНЫЙ ПОИСК МОДЕЛИ ИГРОКА
+local function isPlayerModel(obj, player)
+    if not obj or not obj:IsA("Model") then return false end
+    local uid = obj:GetAttribute("Player") or obj:GetAttribute("UserId")
+        or obj:GetAttribute("Owner") or obj:GetAttribute("PlayerId")
+    if uid ~= nil then
+        if uid == player.UserId or uid == player.Name then return true end
+    end
+    if obj.Name == player.Name then return true end
+    if obj.Name:find(player.Name, 1, true) then return true end
+    return false
+end
+
+local function getPlayerModel(player)
+    if player == LocalPlayer then return nil end
+    local char = player.Character
+    if char and char.Parent and char:FindFirstChildOfClass("Humanoid") then return char end
+    for _, obj in ipairs(Workspace:GetChildren()) do
+        if obj:IsA("Model") and obj:FindFirstChildOfClass("Humanoid") then
+            if isPlayerModel(obj, player) then return obj end
+        end
+    end
+    for _, obj in ipairs(Workspace:GetChildren()) do
+        if obj:IsA("Model") and obj.Name == player.Name then return obj end
+    end
+    return char
+end
+
+local function getAnyHumanoid(model)
+    if not model then return nil end
+    return model:FindFirstChildOfClass("Humanoid")
+        or (model.Parent and model.Parent:FindFirstChildOfClass("Humanoid"))
+end
+
+local function getAnyPart(model, preferName)
+    if not model then return nil end
+    if preferName then
+        local p = model:FindFirstChild(preferName)
+        if p and p:IsA("BasePart") then return p end
+    end
+    local hrp = model:FindFirstChild("HumanoidRootPart")
+    if hrp and hrp:IsA("BasePart") then return hrp end
+    for _, obj in ipairs(model:GetDescendants()) do
+        if obj:IsA("BasePart") then return obj end
+    end
+    return nil
+end
+
+-- TEAM
+local function isSameTeam(p1, p2)
+    if p1 == p2 then return true end
+    local t1, t2 = p1.Team, p2.Team
+    if t1 ~= nil and t2 ~= nil then return t1 == t2 end
+    local a1 = p1:GetAttribute("Team") or p1:GetAttribute("TeamName")
+    local a2 = p2:GetAttribute("Team") or p2:GetAttribute("TeamName")
+    if a1 ~= nil and a2 ~= nil then return a1 == a2 end
+    return false
+end
+
+local function shouldShow(player)
+    if player == LocalPlayer then return false end
+    if CONFIG.ESP_TeamCheck and isSameTeam(player, LocalPlayer) then return false end
+    return true
+end
+
+local function effectiveVisible(player)
+    if not VISIBILITY_ENABLED then return true end
+    local v = visibility[player]
+    if v == nil then return true end
+    return v == true
+end
+
+local function getESPColor(player)
+    if CONFIG.TeamColorESP and player.Team then
+        return player.TeamColor.Color
+    end
+    return effectiveVisible(player) and CONFIG.VisibleColor or CONFIG.HiddenColor
+end
+
+local function getAlertColor(player)
+    if CONFIG.TeamColorESP and player.Team then
+        return player.TeamColor.Color
+    end
+    if not VISIBILITY_ENABLED then
+        return Color3.fromRGB(0, 255, 0)
+    end
+    local vis = visibility[player]
+    if vis == nil then vis = true end
+    return vis and Color3.fromRGB(255, 0, 0) or Color3.fromRGB(0, 255, 0)
+end
+
+-- VISIBILITY
+local function raycastVisible(targetModel, checkPoint)
+    if not targetModel or not checkPoint then return false end
+    local camPos = Camera.CFrame.Position
+    local dir = checkPoint.Position - camPos
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = { LocalPlayer.Character }
+    params.IgnoreWater = true
+    local result = Workspace:Raycast(camPos, dir, params)
+    if not result then return true end
+    if result.Instance:IsDescendantOf(targetModel) then return true end
+    return false
+end
+
+local function checkVisibility(player)
+    if not shouldShow(player) then return false end
+    local model = getPlayerModel(player)
+    if not model then return false end
+    local head = model:FindFirstChild("Head") or getAnyPart(model, "Head")
+    if head and raycastVisible(model, head) then return true end
+    if not CONFIG.CheckHeadOnly then
+        local torso = model:FindFirstChild("UpperTorso")
+            or model:FindFirstChild("Torso")
+            or getAnyPart(model)
+        if torso and raycastVisible(model, torso) then return true end
+    end
+    return false
+end
+
+-- HIGHLIGHT
+local function removeHighlightsFor(player)
+    if highlights[player] then
+        highlights[player]:Destroy()
+        highlights[player] = nil
+    end
+end
+
+local function addHighlightsFor(player)
+    if not ESP_ENABLED or not shouldShow(player) then
+        removeHighlightsFor(player)
+        return
+    end
+    local model = getPlayerModel(player)
+    if not model then return end
+    removeHighlightsFor(player)
+    
+    if CONFIG.UseHighlight then
+        local h = Instance.new("Highlight")
+        h.Name = "ESP_HL_" .. player.Name
+        h.OutlineColor = CONFIG.OutlineColor
+        h.OutlineTransparency = CONFIG.OutlineTransparency
+        h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        h.Adornee = model
+        h.Parent = Workspace
+        highlights[player] = h
+    end
+end
+
+local function updateHighlightColor(player)
+    local h = highlights[player]
+    if not h or not h.Parent then return end
+    
+    if CONFIG.TeamColorESP and player.Team then
+        h.FillColor = player.TeamColor.Color
+        if VISIBILITY_ENABLED and visibility[player] == true then
+            h.FillTransparency = 1
+        else
+            h.FillTransparency = CONFIG.Transparency
+        end
+    else
+        h.FillColor = effectiveVisible(player) and CONFIG.VisibleColor or CONFIG.HiddenColor
+        h.FillTransparency = CONFIG.Transparency
+    end
+    h.OutlineColor = CONFIG.OutlineColor
+end
+
+local function applyHighlightStyles()
+    for p, h in pairs(highlights) do
+        if h and h.Parent then
+            updateHighlightColor(p)
+            h.OutlineTransparency = CONFIG.OutlineTransparency
+        end
+    end
+end
+
+-- TRACER
+local function applyTracerStyles()
+    for p, line in pairs(tracers) do
+        pcall(function()
+            line.Thickness = CONFIG.TracerThickness
+            line.Transparency = CONFIG.TracerTransparency
+            line.Color = getESPColor(p)
+        end)
+    end
+end
+
+local function getTracer(player)
+    if not CONFIG.TracerEnabled then return nil end
+    if not tracers[player] then
+        local ok, line = pcall(function() return Drawing.new("Line") end)
+        if not ok or not line then return nil end
+        line.Thickness = CONFIG.TracerThickness
+        line.Transparency = CONFIG.TracerTransparency
+        line.Color = getESPColor(player)
+        line.Visible = false
+        tracers[player] = line
+    end
+    return tracers[player]
+end
+
+local function removeTracer(player)
+    if tracers[player] then
+        pcall(function() tracers[player]:Remove() end)
+        tracers[player] = nil
+    end
+end
+
+-- BOX + HP
+local function makeESPDrawings()
+    local ok = pcall(function() return Drawing.new("Square") end)
+    if not ok then return nil end
+    local box = Drawing.new("Square"); box.Filled = false; box.Visible = false
+    local hpBg = Drawing.new("Square"); hpBg.Filled = true; hpBg.Color = Color3.fromRGB(0, 0, 0); hpBg.Visible = false
+    local hpFill = Drawing.new("Square"); hpFill.Filled = true; hpFill.Visible = false
+    local hpText = Drawing.new("Text")
+    hpText.Center = true; hpText.Outline = true; hpText.OutlineColor = Color3.fromRGB(0, 0, 0)
+    hpText.Size = 13; hpText.Font = Drawing.Fonts.UI; hpText.Visible = false
+    local distText = Drawing.new("Text")
+    distText.Center = true; distText.Outline = true; distText.OutlineColor = Color3.fromRGB(0, 0, 0)
+    distText.Size = 13; distText.Font = Drawing.Fonts.UI; distText.Visible = false
+    return { box = box, hpBg = hpBg, hpFill = hpFill, hpText = hpText, distText = distText }
+end
+
+local function getESPDrawings(player)
+    if not espObjects[player] then espObjects[player] = makeESPDrawings() end
+    return espObjects[player]
+end
+
+local function removeESPDrawings(player)
+    local d = espObjects[player]
+    if d then
+        for _, obj in pairs(d) do pcall(function() obj:Remove() end) end
+        espObjects[player] = nil
+    end
+end
+
+local function hideESPDrawings(player)
+    local d = espObjects[player]
+    if not d then return end
+    d.box.Visible = false; d.hpBg.Visible = false
+    d.hpFill.Visible = false; d.hpText.Visible = false; d.distText.Visible = false
+end
+
+local function updateESPDrawings(player)
+    local d = getESPDrawings(player)
+    if not d then return end
+    if not ESP_ENABLED or not shouldShow(player) then hideESPDrawings(player); return end
+    local model = getPlayerModel(player)
+    if not model then hideESPDrawings(player); return end
+    local hum = getAnyHumanoid(model)
+    if not hum then hideESPDrawings(player); return end
+
+    local headPart = model:FindFirstChild("Head") or getAnyPart(model, "Head")
+    local rootPart = model:FindFirstChild("HumanoidRootPart")
+        or model:FindFirstChild("UpperTorso") or model:FindFirstChild("Torso") or getAnyPart(model)
+
+    if not headPart or not rootPart then
+        local top, bot
+        for _, obj in ipairs(model:GetDescendants()) do
+            if obj:IsA("BasePart") then
+                if not top or obj.Position.Y > top.Position.Y then top = obj end
+                if not bot or obj.Position.Y < bot.Position.Y then bot = obj end
+            end
+        end
+        headPart = headPart or top; rootPart = rootPart or bot
+    end
+
+    if not headPart then hideESPDrawings(player); return end
+    local topPos = headPart.Position + Vector3.new(0, 0.6, 0)
+    local hip = hum.HipHeight or 2.5
+    local botPos = Vector3.new(rootPart.Position.X, rootPart.Position.Y - hip, rootPart.Position.Z)
+    
+    local spTop = Camera:WorldToViewportPoint(topPos)
+    local spBot = Camera:WorldToViewportPoint(botPos)
+    
+    if spTop.Z <= 0 and spBot.Z <= 0 then hideESPDrawings(player); return end
+
+    local topX, topY, topZ = spTop.X, spTop.Y, spTop.Z
+    local botX, botY, botZ = spBot.X, spBot.Y, spBot.Z
+    
+    local vp = Camera.ViewportSize
+    if math.abs(topX) > vp.X * 5 or math.abs(topY) > vp.Y * 5 or
+       math.abs(botX) > vp.X * 5 or math.abs(botY) > vp.Y * 5 then
+        hideESPDrawings(player)
+        return
+    end
+
+    if topZ <= 0 then topY = botY - 100; topX = botX end
+    if botZ <= 0 then botY = topY + 100; botX = topX end
+
+    local yTop = math.min(topY, botY); local yBot = math.max(topY, botY)
+    local boxH = yBot - yTop
+    
+    if boxH > vp.Y * 1.5 then hideESPDrawings(player); return end
+
+    if boxH < 4 then
+        local cy = (yTop + yBot) / 2
+        yTop = cy - 2
+        yBot = cy + 2
+        boxH = 4
+    end
+
+    local boxW = boxH * CONFIG.BoxWidthRatio
+    if boxW < 3 then boxW = 3 end
+
+    local xCenter = (topX + botX) / 2
+    local xLeft = xCenter - boxW / 2
+
+    if xLeft < -vp.X * 2 or xLeft > vp.X * 3 then
+        hideESPDrawings(player)
+        return
+    end
+
+    local boxColor = getESPColor(player)
+
+    if CONFIG.BoxEnabled then
+        d.box.Visible = true
+        d.box.Position = Vector2.new(xLeft, yTop)
+        d.box.Size = Vector2.new(boxW, boxH)
+        d.box.Thickness = CONFIG.BoxThickness
+        d.box.Color = boxColor
+        d.box.Transparency = CONFIG.BoxTransparency
+    else
+        d.box.Visible = false
+    end
+
+    local barH = CONFIG.HPBarHeight
+    local hpPct = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
+    local barY = yTop - barH - 3
+
+    if CONFIG.HPBarEnabled then
+        d.hpBg.Visible = true
+        d.hpBg.Position = Vector2.new(xLeft, barY)
+        d.hpBg.Size = Vector2.new(boxW, barH)
+        d.hpBg.Color = Color3.fromRGB(0, 0, 0)
+        d.hpBg.Transparency = CONFIG.HPTransparency
+        
+        d.hpFill.Visible = true
+        d.hpFill.Position = Vector2.new(xLeft, barY)
+        d.hpFill.Size = Vector2.new(boxW * hpPct, barH)
+        d.hpFill.Color = Color3.fromRGB(255, 60, 60):Lerp(Color3.fromRGB(60, 255, 60), hpPct)
+        d.hpFill.Transparency = CONFIG.HPTransparency
+    else
+        d.hpBg.Visible = false; d.hpFill.Visible = false
+    end
+
+    if CONFIG.HPTextEnabled then
+        d.hpText.Visible = true
+        d.hpText.Position = Vector2.new(xLeft + boxW / 2, barY - 15)
+        d.hpText.Text = string.format("%d / %d", math.floor(hum.Health + 0.5), math.floor(hum.MaxHealth + 0.5))
+        d.hpText.Color = Color3.fromRGB(255, 255, 255)
+        d.hpText.Transparency = CONFIG.HPTransparency
+    else
+        d.hpText.Visible = false
+    end
+
+    local myChar = LocalPlayer.Character
+    local myRoot = myChar and (myChar:FindFirstChild("HumanoidRootPart") or myChar:FindFirstChild("UpperTorso") or myChar:FindFirstChild("Torso"))
+    local dist = 0
+    if myRoot and rootPart then dist = (rootPart.Position - myRoot.Position).Magnitude end
+
+    if CONFIG.DistTextEnabled then
+        d.distText.Visible = true
+        d.distText.Position = Vector2.new(xLeft + boxW / 2, yBot + 4)
+        d.distText.Text = string.format("%d m", math.floor(dist + 0.5))
+        d.distText.Color = Color3.fromRGB(255, 255, 255)
+        d.distText.Transparency = CONFIG.HPTransparency
+    else
+        d.distText.Visible = false
+    end
+end
+
+-- BACK ALERT
+local alertGui = Instance.new("ScreenGui")
+alertGui.Name = "ESP_BackAlert"
+alertGui.IgnoreGuiInset = true
+alertGui.ResetOnSpawn = false
+alertGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+local alertMarkers = {}
+
+local function getAlertMarker(player)
+    if alertMarkers[player] then return alertMarkers[player] end
+    local f = Instance.new("Frame")
+    f.Name = "Alert_" .. player.Name
+    f.Size = UDim2.new(0, CONFIG.BackAlertSize, 0, CONFIG.BackAlertSize)
+    f.AnchorPoint = Vector2.new(0.5, 0.5)
+    f.BackgroundColor3 = CONFIG.BackAlertColor
+    f.BorderSizePixel = 0; f.Visible = false; f.ZIndex = 10
+    f.Parent = alertGui
+    local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(1, 0); c.Parent = f
+    local s = Instance.new("UIStroke"); s.Name = "AlertStroke"; s.Color = Color3.fromRGB(255, 255, 255)
+    s.Thickness = CONFIG.BackAlertStroke; s.Parent = f
+    alertMarkers[player] = f
+    return f
+end
+
+local function removeAlertMarker(player)
+    if alertMarkers[player] then alertMarkers[player]:Destroy(); alertMarkers[player] = nil end
+end
+
+local function applyAlertStyles()
+    for p, m in pairs(alertMarkers) do
+        m.Size = UDim2.new(0, CONFIG.BackAlertSize, 0, CONFIG.BackAlertSize)
+        local s = m:FindFirstChild("AlertStroke")
+        if s then s.Thickness = CONFIG.BackAlertStroke end
+        m.BackgroundColor3 = getAlertColor(p)
+    end
+end
+
+local function hideAllAlerts()
+    for _, m in pairs(alertMarkers) do m.Visible = false end
+end
+
+local function updateBackAlerts()
+    if not CONFIG.BackAlertEnabled then
+        for _, m in pairs(alertMarkers) do m.Visible = false end
+        return
+    end
+    local vp = Camera.ViewportSize
+    local center = Vector2.new(vp.X / 2, vp.Y / 2)
+    local radiusX = vp.X * CONFIG.BackAlertRadiusX
+    local radiusY = vp.Y * CONFIG.BackAlertRadiusY
+    local camCF = Camera.CFrame
+    local camPos = camCF.Position
+    local forward = camCF.LookVector
+    local right = camCF.RightVector
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player == LocalPlayer or not shouldShow(player) then
+            local m = alertMarkers[player]; if m then m.Visible = false end
+            continue
+        end
+        local model = getPlayerModel(player)
+        local m = getAlertMarker(player)
+        if not model then m.Visible = false; continue end
+        local head = model:FindFirstChild("Head") or getAnyPart(model)
+        if not head then m.Visible = false; continue end
+        local toPlayer = head.Position - camPos
+        if toPlayer.Magnitude < 0.1 then m.Visible = false; continue end
+        local dir = toPlayer.Unit
+        local dot = forward:Dot(dir)
+        if dot >= 0 then m.Visible = false; continue end
+        local az = math.atan2(dir:Dot(right), dot)
+        local sx = center.X + math.sin(az) * radiusX
+        local sy = center.Y - math.cos(az) * radiusY
+        m.Position = UDim2.new(0, sx, 0, sy)
+        
+        m.BackgroundColor3 = getAlertColor(player)
+        
+        m.Visible = true
+    end
+end
+
+-- FOV
+local fovGui = Instance.new("ScreenGui")
+fovGui.Name = "ESP_AimFOV"
+fovGui.IgnoreGuiInset = true
+fovGui.ResetOnSpawn = false
+fovGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+local fovCircle = Instance.new("Frame")
+fovCircle.Size = UDim2.new(0, CONFIG.AimFOV * 2, 0, CONFIG.AimFOV * 2)
+fovCircle.AnchorPoint = Vector2.new(0.5, 0.5)
+fovCircle.BackgroundTransparency = 1
+fovCircle.BorderSizePixel = 0
+fovCircle.ZIndex = 5
+fovCircle.Visible = false
+fovCircle.Parent = fovGui
+local fovStroke = Instance.new("UIStroke")
+fovStroke.Color = Color3.fromRGB(255, 60, 60)
+fovStroke.Thickness = 1
+fovStroke.Transparency = 0.4
+fovStroke.Parent = fovCircle
+local fovCorner = Instance.new("UICorner")
+fovCorner.CornerRadius = UDim.new(1, 0)
+fovCorner.Parent = fovCircle
+
+local function applyFOVStyle()
+    fovCircle.Size = UDim2.new(0, CONFIG.AimFOV * 2, 0, CONFIG.AimFOV * 2)
+end
+applyFOVStyle()
+
+local function getAimCenter()
+    if UserInputService.MouseEnabled then return UserInputService:GetMouseLocation() end
+    local vp = Camera.ViewportSize
+    return Vector2.new(vp.X / 2, vp.Y / 2)
+end
+
+-- TOGGLE
+local function disableAllESP()
+    for _, p in ipairs(Players:GetPlayers()) do
+        removeHighlightsFor(p); hideESPDrawings(p)
+    end
+    for _, line in pairs(tracers) do pcall(function() line.Visible = false end) end
+    hideAllAlerts()
+end
+
+local function enableAllESP()
+    for _, p in ipairs(Players:GetPlayers()) do addHighlightsFor(p) end
+end
+
+-- PLAYER SETUP
+local function setupPlayer(player)
+    if player == LocalPlayer then return end
+    track(player.CharacterAdded:Connect(function()
+        visibility[player] = true
+        task.wait(0.5)
+        if _G.__espKill.dead then return end
+        addHighlightsFor(player)
+    end))
+    track(player.CharacterRemoving:Connect(function()
+        removeHighlightsFor(player); hideESPDrawings(player)
+    end))
+    track(player:GetPropertyChangedSignal("Team"):Connect(function()
+        if _G.__espKill.dead then return end
+        addHighlightsFor(player)
+    end))
+    if player.Character then
+        visibility[player] = true
+        task.spawn(function()
+            task.wait(0.5)
+            if _G.__espKill.dead then return end
+            addHighlightsFor(player)
+        end)
+    end
+end
+
+for _, p in ipairs(Players:GetPlayers()) do setupPlayer(p) end
+track(Players.PlayerAdded:Connect(function(p) visibility[p] = true; setupPlayer(p) end))
+track(Players.PlayerRemoving:Connect(function(player)
+    removeHighlightsFor(player); removeTracer(player)
+    removeAlertMarker(player); removeESPDrawings(player)
+    visibility[player] = nil
+end))
+
+-- VISIBILITY LOOP
+track(RunService.Heartbeat:Connect((function()
+    local acc = 0
+    return function(dt)
+        if _G.__espKill.dead then return end
+        acc = acc + dt
+        if acc < CONFIG.VisibilityCheckRate then return end
+        acc = 0
+        if not ESP_ENABLED then return end
+        if not VISIBILITY_ENABLED then
+            for _, p in ipairs(Players:GetPlayers()) do visibility[p] = true end
+        else
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p ~= LocalPlayer then visibility[p] = checkVisibility(p) end
+            end
+        end
+        for _, p in ipairs(Players:GetPlayers()) do updateHighlightColor(p) end
+    end
+end)()))
+
+-- ESP RENDER
+local function renderTracers()
+    if not CONFIG.TracerEnabled or not ESP_ENABLED then
+        for _, line in pairs(tracers) do pcall(function() line.Visible = false end) end
+        return
+    end
+    local vp = Camera.ViewportSize
+    local origin = CONFIG.TracerFromBottom and Vector2.new(vp.X / 2, vp.Y) or Vector2.new(vp.X / 2, vp.Y / 2)
+    
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player == LocalPlayer or not shouldShow(player) then
+            local line = tracers[player]; if line then line.Visible = false end
+            continue
+        end
+        local model = getPlayerModel(player)
+        local line = getTracer(player)
+        if not line then continue end
+        if not model then line.Visible = false; continue end
+        local head = model:FindFirstChild("Head") or getAnyPart(model)
+        if not head then line.Visible = false; continue end
+        local screenPos, onScreen = Camera:WorldToViewportPoint(head.Position)
+        if not onScreen or screenPos.Z <= 0 then line.Visible = false; continue end
+        
+        line.Color = getESPColor(player)
+        line.From = origin
+        line.To = Vector2.new(screenPos.X, screenPos.Y)
+        line.Visible = true
+    end
+end
+
+RunService:BindToRenderStep("ESP_Render", Enum.RenderPriority.Camera.Value + 2, function()
+    if _G.__espKill.dead then return end
+    if not ESP_ENABLED then
+        for _, line in pairs(tracers) do pcall(function() line.Visible = false end) end
+        hideAllAlerts()
+        for _, p in ipairs(Players:GetPlayers()) do hideESPDrawings(p) end
+        return
+    end
+    renderTracers()
+    updateBackAlerts()
+    for _, p in ipairs(Players:GetPlayers()) do updateESPDrawings(p) end
+end)
+
+-- AIM
+local function getAimTargetPart()
+    if not CONFIG.AimEnabled or not AIM_ACTIVE then return nil end
+    local center = getAimCenter()
+    local best, bestDist = nil, CONFIG.AimFOV
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p == LocalPlayer then continue end
+        if CONFIG.Aim_TeamCheck and isSameTeam(p, LocalPlayer) then continue end
+        local model = getPlayerModel(p)
+        if not model then continue end
+        local hum = getAnyHumanoid(model)
+        if not hum or hum.Health <= 0 then continue end
+        local part = model:FindFirstChild(CONFIG.AimTargetPart)
+        if not (part and part:IsA("BasePart")) then
+            part = model:FindFirstChild("Head") or getAnyPart(model)
+        end
+        if not part then continue end
+        if CONFIG.AimVisibleOnly and not effectiveVisible(p) then continue end
+        local sp, onScreen = Camera:WorldToViewportPoint(part.Position)
+        if not onScreen or sp.Z <= 0 then continue end
+        local dx = sp.X - center.X
+        local dy = sp.Y - center.Y
+        local dist = math.sqrt(dx * dx + dy * dy)
+        if dist < bestDist then bestDist = dist; best = part end
+    end
+    return best
+end
+
+RunService:BindToRenderStep("AIM_Render", Enum.RenderPriority.Camera.Value + 1, function()
+    if _G.__espKill.dead then return end
+    if CONFIG.AimDrawFOV and CONFIG.AimEnabled and AIM_ACTIVE then
+        local center = getAimCenter()
+        fovCircle.Position = UDim2.new(0, center.X, 0, center.Y)
+        fovCircle.Visible = true
+    else
+        fovCircle.Visible = false
+    end
+    if not CONFIG.AimEnabled or not AIM_ACTIVE then return end
+    local target = getAimTargetPart()
+    if not target then return end
+    local camPos = Camera.CFrame.Position
+    local targetPos = target.Position
+    if CONFIG.AimPrediction > 0 then
+        local vel = target.AssemblyLinearVelocity
+        if vel then targetPos = targetPos + vel * CONFIG.AimPrediction end
+    end
+    local dir = (targetPos - camPos).Unit
+    local desired = CFrame.lookAt(camPos, camPos + dir)
+    local alpha = 1 - math.clamp(CONFIG.AimSmoothness, 0, 0.99)
+    Camera.CFrame = Camera.CFrame:Lerp(desired, alpha)
+end)
+
+-- BACKGROUND RECREATE
+track(task.spawn(function()
+    while not _G.__espKill.dead do
+        task.wait(1)
+        if _G.__espKill.dead then break end
+        if not ESP_ENABLED then continue end
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer then
+                local model = getPlayerModel(p)
+                if model and getAnyHumanoid(model) then
+                    if CONFIG.UseHighlight and (not highlights[p] or not highlights[p].Parent) then
+                        addHighlightsFor(p)
+                    end
+                end
+            end
+        end
+    end
+end))
+
+-- ============================================================
+-- MENU
+-- ============================================================
+local TEXT_MAIN    = Color3.fromRGB(230, 230, 235)
+local TEXT_DIM     = Color3.fromRGB(150, 150, 160)
+
+local menuGui = Instance.new("ScreenGui")
+menuGui.Name = "ESP_Hub"
+menuGui.ResetOnSpawn = false
+menuGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+menuGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+local WIN_W, WIN_H = 460, 340
+local lastW, lastH = WIN_W, WIN_H
+
+local main = Instance.new("Frame")
+main.Size = UDim2.new(0, WIN_W, 0, WIN_H)
+main.Position = UDim2.new(0.5, -WIN_W/2, 0.5, -WIN_H/2)
+main.BackgroundColor3 = CONFIG.UI_BgColor
+main.BackgroundTransparency = CONFIG.UI_BgTrans
+main.BorderSizePixel = 0
+main.Active = true
+main.Parent = menuGui
+
+local mainCorner = Instance.new("UICorner"); mainCorner.CornerRadius = UDim.new(0, 6); mainCorner.Parent = main
+local mainStroke = Instance.new("UIStroke"); mainStroke.Name = "MainStroke"; mainStroke.Color = CONFIG.UI_Accent; mainStroke.Thickness = 1; mainStroke.Parent = main
+
+-- ПЕРЕТАСКИВАНИЕ
+do
+    local dragging, dragStart, startPos
+    local function beginDrag(input)
+        dragging = true
+        dragStart = input.Position
+        startPos = main.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then dragging = false end
+        end)
+    end
+    _G.__espBeginDrag = beginDrag
+    track(UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end))
+end
+
+-- ЗАГОЛОВОК
+local titleBar = Instance.new("Frame")
+titleBar.Size = UDim2.new(1, 0, 0, 30)
+titleBar.BackgroundColor3 = CONFIG.UI_BgColor
+titleBar.BackgroundTransparency = math.min(1, CONFIG.UI_BgTrans + 0.05)
+titleBar.BorderSizePixel = 0
+titleBar.Parent = main
+
+local tbCorner = Instance.new("UICorner"); tbCorner.CornerRadius = UDim.new(0, 6); tbCorner.Parent = titleBar
+local tbFix = Instance.new("Frame"); tbFix.Size = UDim2.new(1, 0, 0, 10); tbFix.Position = UDim2.new(0, 0, 1, -10); tbFix.BackgroundColor3 = CONFIG.UI_BgColor; tbFix.BackgroundTransparency = math.min(1, CONFIG.UI_BgTrans + 0.05); tbFix.BorderSizePixel = 0; tbFix.Parent = titleBar
+local accentBar = Instance.new("Frame"); accentBar.Name = "TitleAccent"; accentBar.Size = UDim2.new(0, 3, 0, 16); accentBar.Position = UDim2.new(0, 10, 0.5, -8); accentBar.BackgroundColor3 = CONFIG.UI_Accent; accentBar.BorderSizePixel = 0; accentBar.Parent = titleBar
+local tbAccentCorner = Instance.new("UICorner"); tbAccentCorner.CornerRadius = UDim.new(1, 0); tbAccentCorner.Parent = accentBar
+
+local titleLabel = Instance.new("TextLabel")
+titleLabel.Size = UDim2.new(1, -130, 1, 0); titleLabel.Position = UDim2.new(0, 22, 0, 0); titleLabel.BackgroundTransparency = 1
+titleLabel.Text = "ESP HUB v4.8"; titleLabel.TextColor3 = TEXT_MAIN; titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+titleLabel.Font = Enum.Font.GothamBold; titleLabel.TextSize = CONFIG.UI_TextSize; titleLabel.TextTransparency = CONFIG.UI_TextTrans; titleLabel.Parent = titleBar
+
+local hintLabel = Instance.new("TextLabel")
+hintLabel.Size = UDim2.new(0, 110, 1, 0); hintLabel.Position = UDim2.new(1, -134, 0, 0); hintLabel.BackgroundTransparency = 1
+hintLabel.Text = IS_MOBILE and "[btn]" or "[RS | V=AIM]"; hintLabel.TextColor3 = TEXT_DIM; hintLabel.TextXAlignment = Enum.TextXAlignment.Right
+hintLabel.Font = Enum.Font.Gotham; hintLabel.TextSize = CONFIG.UI_TextSize - 3; hintLabel.TextTransparency = CONFIG.UI_TextTrans; hintLabel.Parent = titleBar
+
+local function mkWinBtn(xOff, text, cb)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(0, 20, 0, 20); b.Position = UDim2.new(1, xOff, 0.5, -10); b.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
+    b.BackgroundTransparency = math.min(1, CONFIG.UI_BgTrans + 0.05)
+    b.Text = text; b.TextColor3 = TEXT_MAIN; b.Font = Enum.Font.GothamBold; b.TextSize = CONFIG.UI_TextSize
+    b.BorderSizePixel = 0; b.AutoButtonColor = false; b.Parent = titleBar
+    b.TextTransparency = CONFIG.UI_TextTrans
+    local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, 4); c.Parent = b
+    b.MouseButton1Click:Connect(function() cb(b) end)
+    return b
+end
+
+local sidebar, content
+local resizeHandle
+
+local minBtn = mkWinBtn(-46, "—", function(self)
+    if main.Size.Y.Offset > 40 then
+        lastW = main.Size.X.Offset; lastH = main.Size.Y.Offset
+        main.Size = UDim2.new(0, lastW, 0, 30)
+        if sidebar then sidebar.Visible = false end
+        if content then content.Visible = false end
+        if resizeHandle then resizeHandle.Visible = false end
+        self.Text = "+"
+    else
+        main.Size = UDim2.new(0, lastW, 0, lastH)
+        if sidebar then sidebar.Visible = true end
+        if content then content.Visible = true end
+        if resizeHandle then resizeHandle.Visible = true end
+        self.Text = "—"
+    end
+end)
+
+local closeBtn = mkWinBtn(-24, "X", function(self)
+    ESP_ENABLED = false; CONFIG.TracerEnabled = false; CONFIG.BackAlertEnabled = false; CONFIG.AimEnabled = false
+    _G.__espKill.dead = true
+    for _, h in pairs(highlights) do if h then h:Destroy() end end; highlights = {}
+    for _, line in pairs(tracers) do pcall(function() line:Remove() end) end; tracers = {}
+    for _, m in pairs(alertMarkers) do if m then m:Destroy() end end; alertMarkers = {}
+    for _, d in pairs(espObjects) do for _, obj in pairs(d) do pcall(function() obj:Remove() end) end end; espObjects = {}
+    for _, c in ipairs(_G.__espKill.connections) do pcall(function() c:Disconnect() end) end; _G.__espKill.connections = {}
+    pcall(function() RunService:UnbindFromRenderStep("ESP_Render") end)
+    pcall(function() RunService:UnbindFromRenderStep("AIM_Render") end)
+    pcall(function() menuGui:Destroy() end); pcall(function() alertGui:Destroy() end); pcall(function() fovGui:Destroy() end)
+    pcall(function() if _G.__espMenuBtn then _G.__espMenuBtn:Destroy() end end)
+    pcall(function() if _G.__espAimBtn then _G.__espAimBtn:Destroy() end end)
+end)
+
+-- УГОЛОК РЕСАЙЗА
+resizeHandle = Instance.new("Frame")
+resizeHandle.Name = "ResizeHandle"; resizeHandle.Size = UDim2.new(0, 16, 0, 16); resizeHandle.Position = UDim2.new(1, -16, 1, -16)
+resizeHandle.BackgroundTransparency = 1; resizeHandle.Active = true; resizeHandle.ZIndex = 10; resizeHandle.Parent = main
+
+local line1 = Instance.new("Frame"); line1.Size = UDim2.new(0, 10, 0, 1); line1.Position = UDim2.new(0, 4, 1, -4); line1.BackgroundColor3 = Color3.fromRGB(110, 110, 120); line1.BorderSizePixel = 0; line1.Parent = resizeHandle
+local line2 = Instance.new("Frame"); line2.Size = UDim2.new(0, 1, 0, 10); line2.Position = UDim2.new(1, -4, 0, 4); line2.BackgroundColor3 = Color3.fromRGB(110, 110, 120); line2.BorderSizePixel = 0; line2.Parent = resizeHandle
+local line3 = Instance.new("Frame"); line3.Size = UDim2.new(0, 6, 0, 1); line3.Position = UDim2.new(0, 4, 1, -7); line3.BackgroundColor3 = Color3.fromRGB(80, 80, 90); line3.BorderSizePixel = 0; line3.Parent = resizeHandle
+
+do
+    local resizing = false; local resizeStart, sizeStart
+    resizeHandle.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            resizing = true; resizeStart = input.Position; sizeStart = main.Size
+            input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then resizing = false end end)
+        end
+    end)
+    track(UserInputService.InputChanged:Connect(function(input)
+        if not resizing then return end
+        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+            local delta = input.Position - resizeStart
+            local newW = math.max(240, sizeStart.X.Offset + delta.X); local newH = math.max(120, sizeStart.Y.Offset + delta.Y)
+            main.Size = UDim2.new(0, newW, 0, newH); lastW, lastH = newW, newH
+        end
+    end))
+end
+
+titleBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        if _G.__espBeginDrag then _G.__espBeginDrag(input) end
+    end
+end)
+
+-- AIM button
+local aimBtnGui = Instance.new("ScreenGui")
+aimBtnGui.Name = "ESP_AimBtn"; aimBtnGui.IgnoreGuiInset = true; aimBtnGui.ResetOnSpawn = false; aimBtnGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+_G.__espAimBtn = aimBtnGui
+
+local aimButton = Instance.new("TextButton")
+aimButton.Size = UDim2.new(0, 60, 0, 60); aimButton.Position = UDim2.new(1, -84, 1, -180); aimButton.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+aimButton.BackgroundTransparency = 0.25; aimButton.Text = "AIM\nOFF"; aimButton.TextColor3 = Color3.fromRGB(200, 200, 200)
+aimButton.Font = Enum.Font.GothamBold; aimButton.TextSize = CONFIG.UI_TextSize; aimButton.BorderSizePixel = 0; aimButton.AutoButtonColor = false; aimButton.Active = true; aimButton.Parent = aimBtnGui
+aimButton.TextTransparency = CONFIG.UI_TextTrans
+local abCorner = Instance.new("UICorner"); abCorner.CornerRadius = UDim.new(1, 0); abCorner.Parent = aimButton
+local abStroke = Instance.new("UIStroke"); abStroke.Name = "AimStroke"; abStroke.Color = CONFIG.UI_Accent; abStroke.Thickness = 2; abStroke.Transparency = 0.5; abStroke.Parent = aimButton
+
+local function updateAimButtonVisual()
+    if AIM_ACTIVE then
+        aimButton.BackgroundColor3 = CONFIG.UI_Accent; aimButton.BackgroundTransparency = 0.1
+        aimButton.TextColor3 = Color3.fromRGB(255, 255, 255); abStroke.Transparency = 0; aimButton.Text = "AIM\nON"
+    else
+        aimButton.BackgroundColor3 = Color3.fromRGB(30, 30, 40); aimButton.BackgroundTransparency = 0.25
+        aimButton.TextColor3 = Color3.fromRGB(200, 200, 200); abStroke.Transparency = 0.5; aimButton.Text = "AIM\nOFF"
+    end
+end
+
+do
+    local dragging = false; local didMove = false; local dragStart, startPos
+    aimButton.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true; didMove = false; dragStart = input.Position; startPos = aimButton.Position
+        end
+    end)
+    track(UserInputService.InputChanged:Connect(function(input)
+        if not dragging then return end
+        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+            local delta = input.Position - dragStart
+            if math.abs(delta.X) + math.abs(delta.Y) > 6 then didMove = true end
+            if didMove then aimButton.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y) end
+        end
+    end))
+    aimButton.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            if not didMove then AIM_ACTIVE = not AIM_ACTIVE; updateAimButtonVisual() end
+            dragging = false; didMove = false
+        end
+    end)
+end
+updateAimButtonVisual()
+
+track(UserInputService.InputBegan:Connect(function(input, gpe)
+    if gpe then return end
+    if _G.__espKill.dead then return end
+    if input.KeyCode == Enum.KeyCode.V then AIM_ACTIVE = not AIM_ACTIVE; updateAimButtonVisual() end
+end))
+
+if IS_MOBILE then
+    local mbGui = Instance.new("ScreenGui")
+    mbGui.Name = "ESP_MenuBtn"; mbGui.IgnoreGuiInset = true; mbGui.ResetOnSpawn = false; mbGui.Parent = LocalPlayer:WaitForChild("PlayerGui"); _G.__espMenuBtn = mbGui
+    local mb = Instance.new("TextButton")
+    mb.Size = UDim2.new(0, 44, 0, 44); mb.Position = UDim2.new(0, 16, 0, 60); mb.BackgroundColor3 = CONFIG.UI_BgColor; mb.BackgroundTransparency = 0.25
+    mb.Text = "≡"; mb.TextColor3 = TEXT_MAIN; mb.Font = Enum.Font.GothamBold; mb.TextSize = CONFIG.UI_TextSize + 10; mb.BorderSizePixel = 0; mb.AutoButtonColor = false; mb.Parent = mbGui
+    mb.TextTransparency = CONFIG.UI_TextTrans
+    local mbc = Instance.new("UICorner"); mbc.CornerRadius = UDim.new(1, 0); mbc.Parent = mb
+    local mbs = Instance.new("UIStroke"); mbs.Name = "MobileStroke"; mbs.Color = CONFIG.UI_Accent; mbs.Thickness = 2; mbs.Transparency = 0.3; mbs.Parent = mb
+    mb.MouseButton1Click:Connect(function() main.Visible = not main.Visible end)
+end
+
+sidebar = Instance.new("Frame")
+sidebar.Size = UDim2.new(0, 110, 1, -30); sidebar.Position = UDim2.new(0, 0, 0, 30); sidebar.BackgroundColor3 = CONFIG.UI_BgColor; sidebar.BackgroundTransparency = math.min(1, CONFIG.UI_BgTrans + 0.05); sidebar.BorderSizePixel = 0; sidebar.Parent = main
+local sidePad = Instance.new("UIPadding"); sidePad.PaddingTop = UDim.new(0, 8); sidePad.PaddingLeft = UDim.new(0, 6); sidePad.PaddingRight = UDim.new(0, 6); sidePad.Parent = sidebar
+local sideLayout = Instance.new("UIListLayout"); sideLayout.Padding = UDim.new(0, 4); sideLayout.SortOrder = Enum.SortOrder.LayoutOrder; sideLayout.Parent = sidebar
+
+content = Instance.new("Frame")
+content.Size = UDim2.new(1, -110, 1, -30); content.Position = UDim2.new(0, 110, 0, 30); content.BackgroundTransparency = 1; content.Parent = main
+local contentPad = Instance.new("UIPadding"); contentPad.PaddingTop = UDim.new(0, 8); contentPad.PaddingBottom = UDim.new(0, 8); contentPad.PaddingLeft = UDim.new(0, 8); contentPad.PaddingRight = UDim.new(0, 8); contentPad.Parent = content
+
+local pages = {}
+local function makePage(name)
+    local p = Instance.new("ScrollingFrame")
+    p.Name = name; p.Size = UDim2.new(1, 0, 1, 0); p.BackgroundTransparency = 1; p.BorderSizePixel = 0
+    p.ScrollBarThickness = 3; p.ScrollBarImageColor3 = Color3.fromRGB(45, 45, 55); p.CanvasSize = UDim2.new(0, 0, 0, 0); p.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    p.Visible = false; p.Parent = content
+    local l = Instance.new("UIListLayout"); l.Padding = UDim.new(0, 6); l.SortOrder = Enum.SortOrder.LayoutOrder; l.Parent = p
+    pages[name] = p
+    return p
+end
+
+local function addSection(parent, text)
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, 0, 0, 18); lbl.BackgroundTransparency = 1; lbl.Text = string.upper(text); lbl.TextColor3 = CONFIG.UI_Accent
+    lbl.Font = Enum.Font.GothamBold; lbl.TextSize = CONFIG.UI_TextSize - 2; lbl.TextXAlignment = Enum.TextXAlignment.Left; lbl.Parent = parent
+    lbl.TextTransparency = CONFIG.UI_TextTrans
+    return lbl
+end
+
+local function addToggle(parent, name, initial, callback)
+    local row = Instance.new("Frame")
+    row.Name = "Row"
+    row.Size = UDim2.new(1, 0, 0, 30); row.BackgroundColor3 = Color3.fromRGB(26, 26, 32); row.BackgroundTransparency = math.min(1, CONFIG.UI_BgTrans + 0.05); row.BorderSizePixel = 0; row.Parent = parent
+    local rc = Instance.new("UICorner"); rc.CornerRadius = UDim.new(0, 5); rc.Parent = row
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, -70, 1, 0); lbl.Position = UDim2.new(0, 12, 0, 0); lbl.BackgroundTransparency = 1
+    lbl.Text = name; lbl.TextColor3 = TEXT_MAIN; lbl.Font = Enum.Font.Gotham; lbl.TextSize = CONFIG.UI_TextSize; lbl.TextXAlignment = Enum.TextXAlignment.Left; lbl.Parent = row
+    lbl.TextTransparency = CONFIG.UI_TextTrans
+    local btn = Instance.new("TextButton")
+    btn.Name = "ToggleBtn"
+    btn.Size = UDim2.new(0, 44, 0, 22); btn.Position = UDim2.new(1, -54, 0.5, -11); 
+    btn.BackgroundColor3 = initial and TOGGLE_ON_COLOR or TOGGLE_OFF_COLOR
+    btn.BorderSizePixel = 0; btn.Text = ""; btn.AutoButtonColor = false; btn.Parent = row
+    local bc = Instance.new("UICorner"); bc.CornerRadius = UDim.new(1, 0); bc.Parent = btn
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0, 16, 0, 16)
+    knob.Position = initial and UDim2.new(1, -18, 0.5, -8) or UDim2.new(0, 2, 0.5, -8)
+    knob.BackgroundColor3 = TOGGLE_KNOB_COLOR; knob.BorderSizePixel = 0; knob.Parent = btn
+    local kc = Instance.new("UICorner"); kc.CornerRadius = UDim.new(1, 0); kc.Parent = knob
+    local state = initial
+    btn:SetAttribute("State", state)
+    btn.MouseButton1Click:Connect(function()
+        state = not state
+        btn:SetAttribute("State", state)
+        btn.BackgroundColor3 = state and TOGGLE_ON_COLOR or TOGGLE_OFF_COLOR
+        knob.Position = state and UDim2.new(1, -18, 0.5, -8) or UDim2.new(0, 2, 0.5, -8)
+        if callback then callback(state) end
+    end)
+    return row
+end
+
+local function addSlider(parent, name, min, max, initial, isFloat, callback)
+    local row = Instance.new("Frame")
+    row.Name = "Row"
+    row.Size = UDim2.new(1, 0, 0, 38); row.BackgroundColor3 = Color3.fromRGB(26, 26, 32); row.BackgroundTransparency = math.min(1, CONFIG.UI_BgTrans + 0.05); row.BorderSizePixel = 0; row.Parent = parent
+    local rc = Instance.new("UICorner"); rc.CornerRadius = UDim.new(0, 5); rc.Parent = row
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, -60, 0, 16); lbl.Position = UDim2.new(0, 12, 0, 3); lbl.BackgroundTransparency = 1
+    lbl.Text = name; lbl.TextColor3 = TEXT_MAIN; lbl.Font = Enum.Font.Gotham; lbl.TextSize = CONFIG.UI_TextSize - 1; lbl.TextXAlignment = Enum.TextXAlignment.Left; lbl.Parent = row
+    lbl.TextTransparency = CONFIG.UI_TextTrans
+    local valLbl = Instance.new("TextLabel")
+    valLbl.Name = "SliderValue"
+    valLbl.Size = UDim2.new(0, 55, 0, 16); valLbl.Position = UDim2.new(1, -67, 0, 3); valLbl.BackgroundTransparency = 1
+    valLbl.Text = isFloat and string.format("%.2f", initial) or tostring(initial)
+    valLbl.TextColor3 = CONFIG.UI_Accent; valLbl.Font = Enum.Font.GothamBold; valLbl.TextSize = CONFIG.UI_TextSize - 1; valLbl.TextXAlignment = Enum.TextXAlignment.Right; valLbl.Parent = row
+    valLbl.TextTransparency = CONFIG.UI_TextTrans
+    local st = Instance.new("Frame")
+    st.Size = UDim2.new(1, -24, 0, 5); st.Position = UDim2.new(0, 12, 0, 26); st.BackgroundColor3 = Color3.fromRGB(40, 40, 48); st.BackgroundTransparency = math.min(1, CONFIG.UI_BgTrans + 0.1); st.BorderSizePixel = 0; st.Parent = row
+    local tc = Instance.new("UICorner"); tc.CornerRadius = UDim.new(1, 0); tc.Parent = st
+    local fill = Instance.new("Frame")
+    fill.Name = "SliderFill"
+    fill.Size = UDim2.new(0, 0, 1, 0); fill.BackgroundColor3 = CONFIG.UI_Accent; fill.BorderSizePixel = 0; fill.Parent = st
+    local fc = Instance.new("UICorner"); fc.CornerRadius = UDim.new(1, 0); fc.Parent = fill
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0, 12, 0, 12); knob.AnchorPoint = Vector2.new(0.5, 0.5); knob.Position = UDim2.new(0, 0, 0.5, 0)
+    knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255); knob.BorderSizePixel = 0; knob.ZIndex = 2; knob.Parent = st
+    local kc = Instance.new("UICorner"); kc.CornerRadius = UDim.new(1, 0); kc.Parent = knob
+    local value = initial; local dragging = false
+    local function setValue(v)
+        value = math.clamp(v, min, max)
+        local alpha = (value - min) / (max - min)
+        fill.Size = UDim2.new(alpha, 0, 1, 0); knob.Position = UDim2.new(alpha, 0, 0.5, 0)
+        valLbl.Text = isFloat and string.format("%.2f", value) or tostring(math.floor(value + 0.5))
+        if callback then callback(value) end
+    end
+    setValue(initial)
+    local function upd(inp)
+        local absPos = st.AbsolutePosition.X; local absSize = st.AbsoluteSize.X
+        if absSize <= 0 then return end
+        local alpha = math.clamp((inp.Position.X - absPos) / absSize, 0, 1)
+        setValue(min + (max - min) * alpha)
+    end
+    st.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true; upd(input)
+        end
+    end)
+    track(UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then upd(input) end
+    end))
+    track(UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then dragging = false end
+    end))
+    return row, setValue
+end
+
+local function makeTab(name, pageName)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, 0, 0, 28); btn.BackgroundColor3 = Color3.fromRGB(26, 26, 32); btn.BackgroundTransparency = 1; btn.Text = "  " .. name
+    btn.TextColor3 = TEXT_DIM; btn.Font = Enum.Font.GothamMedium; btn.TextSize = CONFIG.UI_TextSize; btn.TextXAlignment = Enum.TextXAlignment.Left
+    btn.BorderSizePixel = 0; btn.AutoButtonColor = false; btn.Parent = sidebar
+    btn.TextTransparency = CONFIG.UI_TextTrans
+    local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, 4); c.Parent = btn
+    local indicator = Instance.new("Frame")
+    indicator.Name = "TabIndicator"
+    indicator.Size = UDim2.new(0, 2, 0, 14); indicator.Position = UDim2.new(0, 0, 0.5, -7); indicator.BackgroundColor3 = CONFIG.UI_Accent
+    indicator.BorderSizePixel = 0; indicator.Visible = false; indicator.Parent = btn
+    local ic = Instance.new("UICorner"); ic.CornerRadius = UDim.new(1, 0); ic.Parent = indicator
+    btn.MouseButton1Click:Connect(function()
+        for _, p in pairs(pages) do p.Visible = false end
+        for _, sib in ipairs(sidebar:GetChildren()) do
+            if sib:IsA("TextButton") then
+                sib.BackgroundTransparency = 1; sib.TextColor3 = TEXT_DIM
+                local ind = sib:FindFirstChildOfClass("Frame"); if ind then ind.Visible = false end
+            end
+        end
+        if pages[pageName] then pages[pageName].Visible = true end
+        btn.BackgroundTransparency = 0; btn.TextColor3 = TEXT_MAIN; indicator.Visible = true
+    end)
+    return btn
+end
+
+local pageVisual  = makePage("Visual")
+local pageBox     = makePage("BoxHP")
+local pageTracers = makePage("Tracers")
+local pageAlert   = makePage("Alert")
+local pageAim     = makePage("Aim")
+local pageColors  = makePage("UI_Colors")
+local pageUI      = makePage("UI_Settings")
+
+addSection(pageVisual, "Highlight")
+addToggle(pageVisual, "ESP Enabled", ESP_ENABLED, function(v)
+    ESP_ENABLED = v
+    if v then enableAllESP() else disableAllESP() end
+end)
+addToggle(pageVisual, "Visibility Check", VISIBILITY_ENABLED, function(v) 
+    VISIBILITY_ENABLED = v 
+    applyAlertStyles()
+end)
+addToggle(pageVisual, "Team Check", CONFIG.ESP_TeamCheck, function(v)
+    CONFIG.ESP_TeamCheck = v
+    for _, p in ipairs(Players:GetPlayers()) do addHighlightsFor(p) end
+end)
+addToggle(pageVisual, "Use Highlight", CONFIG.UseHighlight, function(v)
+    CONFIG.UseHighlight = v
+    for _, p in ipairs(Players:GetPlayers()) do addHighlightsFor(p) end
+end)
+addSlider(pageVisual, "Fill Transparency", 0, 1, CONFIG.Transparency, true, function(v)
+    CONFIG.Transparency = v
+    applyHighlightStyles()
+end)
+
+addSection(pageBox, "Box (Drawing)")
+addToggle(pageBox, "Box Enabled", CONFIG.BoxEnabled, function(v) CONFIG.BoxEnabled = v end)
+addSlider(pageBox, "Box Thickness", 1, 5, CONFIG.BoxThickness, false, function(v) CONFIG.BoxThickness = math.floor(v + 0.5) end)
+addSlider(pageBox, "Box Transparency", 0, 1, CONFIG.BoxTransparency, true, function(v) CONFIG.BoxTransparency = v end)
+addSlider(pageBox, "Box Width Ratio", 0.3, 0.9, CONFIG.BoxWidthRatio, true, function(v) CONFIG.BoxWidthRatio = v end)
+
+addSection(pageBox, "HP Bar (над боксом)")
+addToggle(pageBox, "HP Bar Enabled", CONFIG.HPBarEnabled, function(v) CONFIG.HPBarEnabled = v end)
+addToggle(pageBox, "HP Text Enabled", CONFIG.HPTextEnabled, function(v) CONFIG.HPTextEnabled = v end)
+addSlider(pageBox, "HP Transparency", 0, 1, CONFIG.HPTransparency, true, function(v) CONFIG.HPTransparency = v end)
+addSlider(pageBox, "HP Bar Height", 2, 10, CONFIG.HPBarHeight, false, function(v) CONFIG.HPBarHeight = math.floor(v + 0.5) end)
+
+addSection(pageBox, "Distance (под боксом)")
+addToggle(pageBox, "Distance Enabled", CONFIG.DistTextEnabled, function(v) CONFIG.DistTextEnabled = v end)
+
+addSection(pageTracers, "Tracer Lines")
+addToggle(pageTracers, "Tracers Enabled", CONFIG.TracerEnabled, function(v)
+    CONFIG.TracerEnabled = v
+    if not v then for _, line in pairs(tracers) do pcall(function() line.Visible = false end) end end
+end)
+addToggle(pageTracers, "From Bottom", CONFIG.TracerFromBottom, function(v) CONFIG.TracerFromBottom = v end)
+addSlider(pageTracers, "Thickness", 1, 6, CONFIG.TracerThickness, false, function(v)
+    CONFIG.TracerThickness = math.floor(v + 0.5); applyTracerStyles()
+end)
+addSlider(pageTracers, "Transparency", 0, 1, CONFIG.TracerTransparency, true, function(v)
+    CONFIG.TracerTransparency = v; applyTracerStyles()
+end)
+
+addSection(pageAlert, "Back Alert")
+addToggle(pageAlert, "Alert Enabled", CONFIG.BackAlertEnabled, function(v) CONFIG.BackAlertEnabled = v end)
+addSlider(pageAlert, "Marker Size", 6, 40, CONFIG.BackAlertSize, false, function(v) CONFIG.BackAlertSize = math.floor(v + 0.5); applyAlertStyles() end)
+addSlider(pageAlert, "Stroke Thickness", 0, 5, CONFIG.BackAlertStroke, false, function(v) CONFIG.BackAlertStroke = math.floor(v + 0.5); applyAlertStyles() end)
+addSlider(pageAlert, "Radius X", 0.05, 0.60, CONFIG.BackAlertRadiusX, true, function(v) CONFIG.BackAlertRadiusX = v end)
+addSlider(pageAlert, "Radius Y", 0.05, 0.60, CONFIG.BackAlertRadiusY, true, function(v) CONFIG.BackAlertRadiusY = v end)
+
+addSection(pageAim, "Aimbot (V / кнопка)")
+addToggle(pageAim, "Aim Enabled", CONFIG.AimEnabled, function(v) CONFIG.AimEnabled = v end)
+addToggle(pageAim, "Team Check", CONFIG.Aim_TeamCheck, function(v) CONFIG.Aim_TeamCheck = v end)
+addToggle(pageAim, "Visible Only", CONFIG.AimVisibleOnly, function(v) CONFIG.AimVisibleOnly = v end)
+addToggle(pageAim, "Draw FOV", CONFIG.AimDrawFOV, function(v) CONFIG.AimDrawFOV = v end)
+addSlider(pageAim, "FOV", 20, 500, CONFIG.AimFOV, false, function(v) CONFIG.AimFOV = math.floor(v + 0.5); applyFOVStyle() end)
+addSlider(pageAim, "Smoothness", 0, 0.9, CONFIG.AimSmoothness, true, function(v) CONFIG.AimSmoothness = v end)
+addSlider(pageAim, "Prediction", 0, 0.5, CONFIG.AimPrediction, true, function(v) CONFIG.AimPrediction = v end)
+
+-- ============================================================
+-- UI CUSTOMIZATION (RGB/HEX + WHEEL)
+-- ============================================================
+local function rgbToHex(c)
+    local r = math.floor(c.R * 255 + 0.5)
+    local g = math.floor(c.G * 255 + 0.5)
+    local b = math.floor(c.B * 255 + 0.5)
+    return string.format("#%02x%02x%02x", r, g, b)
+end
+
+local function hexToRgb(hex)
+    local cleanHex = string.gsub(hex, "#", "")
+    if #cleanHex == 3 then
+        cleanHex = string.sub(cleanHex,1,1)..string.sub(cleanHex,1,1) .. string.sub(cleanHex,2,2)..string.sub(cleanHex,2,2) .. string.sub(cleanHex,3,3)..string.sub(cleanHex,3,3)
+    end
+    if #cleanHex ~= 6 then return nil end
+    local r = tonumber(string.sub(cleanHex, 1, 2), 16)
+    local g = tonumber(string.sub(cleanHex, 3, 4), 16)
+    local b = tonumber(string.sub(cleanHex, 5, 6), 16)
+    if r and g and b then return Color3.fromRGB(r, g, b) end
+    return nil
+end
+
+local function applyUITheme()
+    main.BackgroundColor3 = CONFIG.UI_BgColor
+    main.BackgroundTransparency = CONFIG.UI_BgTrans
+    
+    titleBar.BackgroundColor3 = CONFIG.UI_BgColor
+    titleBar.BackgroundTransparency = math.min(1, CONFIG.UI_BgTrans + 0.05)
+    tbFix.BackgroundColor3 = CONFIG.UI_BgColor
+    tbFix.BackgroundTransparency = math.min(1, CONFIG.UI_BgTrans + 0.05)
+    
+    sidebar.BackgroundColor3 = CONFIG.UI_BgColor
+    sidebar.BackgroundTransparency = math.min(1, CONFIG.UI_BgTrans + 0.05)
+    
+    accentBar.BackgroundColor3 = CONFIG.UI_Accent
+    mainStroke.Color = CONFIG.UI_Accent
+    
+    if aimButton then
+        abStroke.Color = CONFIG.UI_Accent
+        aimButton.TextSize = CONFIG.UI_TextSize
+        aimButton.TextTransparency = CONFIG.UI_TextTrans
+        updateAimButtonVisual()
+    end
+    
+    if _G.__espMenuBtn then
+        for _, child in ipairs(_G.__espMenuBtn:GetChildren()) do
+            if child:IsA("TextButton") then
+                child.TextTransparency = CONFIG.UI_TextTrans
+                child.TextSize = CONFIG.UI_TextSize + 10
+                local stroke = child:FindFirstChildOfClass("UIStroke")
+                if stroke then stroke.Color = CONFIG.UI_Accent end
+            end
+        end
+    end
+
+    for _, desc in ipairs(main:GetDescendants()) do
+        if desc.Name == "TabIndicator" or desc.Name == "SliderFill" then
+            if desc:IsA("Frame") then desc.BackgroundColor3 = CONFIG.UI_Accent end
+        elseif desc.Name == "SliderValue" then
+            if desc:IsA("TextLabel") then
+                desc.TextColor3 = CONFIG.UI_Accent
+                desc.TextTransparency = CONFIG.UI_TextTrans
+                desc.TextSize = CONFIG.UI_TextSize - 1
+            end
+        elseif desc.Name == "ToggleBtn" then
+            if desc:IsA("TextButton") then
+                if desc:GetAttribute("State") then 
+                    desc.BackgroundColor3 = TOGGLE_ON_COLOR 
+                else 
+                    desc.BackgroundColor3 = TOGGLE_OFF_COLOR 
+                end
+                desc.TextTransparency = CONFIG.UI_TextTrans
+            end
+        elseif desc.Name == "MainStroke" or desc.Name == "AimStroke" or desc.Name == "MobileStroke" then
+            if desc:IsA("UIStroke") then desc.Color = CONFIG.UI_Accent end
+        elseif desc.Name == "Row" then
+            if desc:IsA("Frame") then
+                desc.BackgroundColor3 = Color3.fromRGB(26, 26, 32)
+                desc.BackgroundTransparency = math.min(1, CONFIG.UI_BgTrans + 0.05)
+            end
+        elseif desc:IsA("TextLabel") then
+            desc.TextTransparency = CONFIG.UI_TextTrans
+            desc.TextSize = CONFIG.UI_TextSize
+        end
+    end
+end
+
+-- ACCENT COLOR PICKER (Page: UI_Colors)
+addSection(pageColors, "Accent Color")
+
+local inputContainer = Instance.new("Frame")
+inputContainer.Size = UDim2.new(1, 0, 0, 66)
+inputContainer.BackgroundColor3 = Color3.fromRGB(26, 26, 32)
+inputContainer.BackgroundTransparency = math.min(1, CONFIG.UI_BgTrans + 0.05)
+inputContainer.BorderSizePixel = 0
+inputContainer.Parent = pageColors
+local icCorner = Instance.new("UICorner"); icCorner.CornerRadius = UDim.new(0, 5); icCorner.Parent = inputContainer
+
+local rgbBox = Instance.new("TextBox")
+rgbBox.Size = UDim2.new(1, -60, 0, 24)
+rgbBox.Position = UDim2.new(0, 10, 0, 10)
+rgbBox.BackgroundColor3 = Color3.fromRGB(40, 40, 48)
+rgbBox.BorderSizePixel = 0
+rgbBox.Text = "255, 255, 255"
+rgbBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+rgbBox.Font = Enum.Font.Gotham
+rgbBox.TextSize = 12
+rgbBox.Parent = inputContainer
+local rgbCorner = Instance.new("UICorner"); rgbCorner.CornerRadius = UDim.new(0, 4); rgbCorner.Parent = rgbBox
+
+local hexBox = Instance.new("TextBox")
+hexBox.Size = UDim2.new(1, -60, 0, 24)
+hexBox.Position = UDim2.new(0, 10, 0, 38)
+hexBox.BackgroundColor3 = Color3.fromRGB(40, 40, 48)
+hexBox.BorderSizePixel = 0
+hexBox.Text = "#ffffff"
+hexBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+hexBox.Font = Enum.Font.Gotham
+hexBox.TextSize = 12
+hexBox.Parent = inputContainer
+local hexCorner = Instance.new("UICorner"); hexCorner.CornerRadius = UDim.new(0, 4); hexCorner.Parent = hexBox
+
+local pipetteBtn = Instance.new("TextButton")
+pipetteBtn.Size = UDim2.new(0, 40, 0, 52)
+pipetteBtn.Position = UDim2.new(1, -50, 0, 10)
+pipetteBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 48)
+pipetteBtn.BorderSizePixel = 0
+pipetteBtn.Text = "Pick"
+pipetteBtn.TextColor3 = CONFIG.UI_Accent
+pipetteBtn.Font = Enum.Font.GothamBold
+pipetteBtn.TextSize = 11
+pipetteBtn.Parent = inputContainer
+local pipCorner = Instance.new("UICorner"); pipCorner.CornerRadius = UDim.new(0, 4); pipCorner.Parent = pipetteBtn
+
+local pickerSize = 180
+local pickerFrame = Instance.new("Frame")
+pickerFrame.Size = UDim2.new(0, pickerSize, 0, pickerSize)
+pickerFrame.Position = UDim2.new(0.5, -pickerSize/2, 0, 5)
+pickerFrame.BackgroundTransparency = 1
+pickerFrame.ClipsDescendants = true
+pickerFrame.Visible = false
+pickerFrame.Parent = pageColors
+
+local pickerCorner = Instance.new("UICorner")
+pickerCorner.CornerRadius = UDim.new(1, 0)
+pickerCorner.Parent = pickerFrame
+
+local updateBrightnessSlider = nil
+
+local gridRes = 30
+local cellSize = pickerSize / gridRes
+local colorCells = {}
+local maxDist = (gridRes - 1) / 2
+
+for y = 0, gridRes - 1 do
+    for x = 0, gridRes - 1 do
+        local dx = x - maxDist
+        local dy = y - maxDist
+        local dist = math.sqrt(dx*dx + dy*dy)
+
+        if dist <= maxDist + 0.5 then
+            local btn = Instance.new("TextButton")
+            btn.Size = UDim2.new(0, cellSize + 1, 0, cellSize + 1) 
+            btn.Position = UDim2.new(0, x * cellSize - 0.5, 0, y * cellSize - 0.5)
+            btn.Text = ""
+            btn.BorderSizePixel = 0
+            
+            local btnCorner = Instance.new("UICorner")
+            btnCorner.CornerRadius = UDim.new(1, 0)
+            btnCorner.Parent = btn
+
+            local h = (math.atan2(dy, dx) / (2 * math.pi)) % 1
+            local s = math.clamp(dist / maxDist, 0, 1)
+            
+            btn.BackgroundColor3 = Color3.fromHSV(h, s, 1) 
+            btn.Parent = pickerFrame
+            btn.MouseButton1Click:Connect(function()
+                if CONFIG.UI_Value < 0.05 then
+                    CONFIG.UI_Value = 1
+                    if updateBrightnessSlider then updateBrightnessSlider(1) end
+                end
+                CONFIG.UI_Accent = Color3.fromHSV(h, s, CONFIG.UI_Value)
+                rgbBox.Text = string.format("%d, %d, %d", math.floor(CONFIG.UI_Accent.R*255+0.5), math.floor(CONFIG.UI_Accent.G*255+0.5), math.floor(CONFIG.UI_Accent.B*255+0.5))
+                hexBox.Text = rgbToHex(CONFIG.UI_Accent)
+                applyUITheme()
+                pickerFrame.Visible = false
+            end)
+            table.insert(colorCells, {btn = btn, h = h, s = s})
+        end
+    end
+end
+
+pipetteBtn.MouseButton1Click:Connect(function()
+    pickerFrame.Visible = not pickerFrame.Visible
+end)
+
+rgbBox.FocusLost:Connect(function()
+    local nums = {}
+    for num in string.gmatch(rgbBox.Text, "%d+") do
+        table.insert(nums, tonumber(num))
+    end
+    if #nums >= 3 then
+        local c = Color3.fromRGB(math.clamp(nums[1], 0, 255), math.clamp(nums[2], 0, 255), math.clamp(nums[3], 0, 255))
+        CONFIG.UI_Accent = c
+        local h, s, v = Color3.toHSV(c)
+        CONFIG.UI_Value = v
+        if updateBrightnessSlider then updateBrightnessSlider(v) end
+        hexBox.Text = rgbToHex(c)
+        applyUITheme()
+    end
+    rgbBox.Text = string.format("%d, %d, %d", math.floor(CONFIG.UI_Accent.R*255+0.5), math.floor(CONFIG.UI_Accent.G*255+0.5), math.floor(CONFIG.UI_Accent.B*255+0.5))
+end)
+
+hexBox.FocusLost:Connect(function()
+    local c = hexToRgb(hexBox.Text)
+    if c then
+        CONFIG.UI_Accent = c
+        local h, s, v = Color3.toHSV(c)
+        CONFIG.UI_Value = v
+        if updateBrightnessSlider then updateBrightnessSlider(v) end
+        rgbBox.Text = string.format("%d, %d, %d", math.floor(c.R*255+0.5), math.floor(c.G*255+0.5), math.floor(c.B*255+0.5))
+        applyUITheme()
+    end
+    hexBox.Text = rgbToHex(CONFIG.UI_Accent)
+end)
+
+local briRow, briSet = addSlider(pageColors, "Accent Brightness", 0, 1, CONFIG.UI_Value, true, function(v)
+    CONFIG.UI_Value = v
+    local h, s, _ = Color3.toHSV(CONFIG.UI_Accent)
+    CONFIG.UI_Accent = Color3.fromHSV(h, s, v)
+    rgbBox.Text = string.format("%d, %d, %d", math.floor(CONFIG.UI_Accent.R*255+0.5), math.floor(CONFIG.UI_Accent.G*255+0.5), math.floor(CONFIG.UI_Accent.B*255+0.5))
+    hexBox.Text = rgbToHex(CONFIG.UI_Accent)
+    applyUITheme()
+end)
+updateBrightnessSlider = briSet
+
+-- BACKGROUND COLOR PICKER (Page: UI_Colors)
+addSection(pageColors, "Background Color")
+
+local bgInputContainer = Instance.new("Frame")
+bgInputContainer.Size = UDim2.new(1, 0, 0, 66)
+bgInputContainer.BackgroundColor3 = Color3.fromRGB(26, 26, 32)
+bgInputContainer.BackgroundTransparency = math.min(1, CONFIG.UI_BgTrans + 0.05)
+bgInputContainer.BorderSizePixel = 0
+bgInputContainer.Parent = pageColors
+local bgIcCorner = Instance.new("UICorner"); bgIcCorner.CornerRadius = UDim.new(0, 5); bgIcCorner.Parent = bgInputContainer
+
+local bgRgbBox = Instance.new("TextBox")
+bgRgbBox.Size = UDim2.new(1, -60, 0, 24)
+bgRgbBox.Position = UDim2.new(0, 10, 0, 10)
+bgRgbBox.BackgroundColor3 = Color3.fromRGB(40, 40, 48)
+bgRgbBox.BorderSizePixel = 0
+bgRgbBox.Text = "0, 0, 0"
+bgRgbBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+bgRgbBox.Font = Enum.Font.Gotham
+bgRgbBox.TextSize = 12
+bgRgbBox.Parent = bgInputContainer
+local bgRgbCorner = Instance.new("UICorner"); bgRgbCorner.CornerRadius = UDim.new(0, 4); bgRgbCorner.Parent = bgRgbBox
+
+local bgHexBox = Instance.new("TextBox")
+bgHexBox.Size = UDim2.new(1, -60, 0, 24)
+bgHexBox.Position = UDim2.new(0, 10, 0, 38)
+bgHexBox.BackgroundColor3 = Color3.fromRGB(40, 40, 48)
+bgHexBox.BorderSizePixel = 0
+bgHexBox.Text = "#000000"
+bgHexBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+bgHexBox.Font = Enum.Font.Gotham
+bgHexBox.TextSize = 12
+bgHexBox.Parent = bgInputContainer
+local bgHexCorner = Instance.new("UICorner"); bgHexCorner.CornerRadius = UDim.new(0, 4); bgHexCorner.Parent = bgHexBox
+
+local bgPickBtn = Instance.new("TextButton")
+bgPickBtn.Size = UDim2.new(0, 40, 0, 52)
+bgPickBtn.Position = UDim2.new(1, -50, 0, 10)
+bgPickBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 48)
+bgPickBtn.BorderSizePixel = 0
+bgPickBtn.Text = "Pick"
+bgPickBtn.TextColor3 = CONFIG.UI_Accent
+bgPickBtn.Font = Enum.Font.GothamBold
+bgPickBtn.TextSize = 11
+bgPickBtn.Parent = bgInputContainer
+local bgPickCorner = Instance.new("UICorner"); bgPickCorner.CornerRadius = UDim.new(0, 4); bgPickCorner.Parent = bgPickBtn
+
+local bgPickerFrame = Instance.new("Frame")
+bgPickerFrame.Size = UDim2.new(0, pickerSize, 0, pickerSize)
+bgPickerFrame.Position = UDim2.new(0.5, -pickerSize/2, 0, 5)
+bgPickerFrame.BackgroundTransparency = 1
+bgPickerFrame.ClipsDescendants = true
+bgPickerFrame.Visible = false
+bgPickerFrame.Parent = pageColors
+
+local bgPickerCorner = Instance.new("UICorner")
+bgPickerCorner.CornerRadius = UDim.new(1, 0)
+bgPickerCorner.Parent = bgPickerFrame
+
+local updateBgBrightness = nil
+
+for y = 0, gridRes - 1 do
+    for x = 0, gridRes - 1 do
+        local dx = x - maxDist
+        local dy = y - maxDist
+        local dist = math.sqrt(dx*dx + dy*dy)
+
+        if dist <= maxDist + 0.5 then
+            local btn = Instance.new("TextButton")
+            btn.Size = UDim2.new(0, cellSize + 1, 0, cellSize + 1) 
+            btn.Position = UDim2.new(0, x * cellSize - 0.5, 0, y * cellSize - 0.5)
+            btn.Text = ""
+            btn.BorderSizePixel = 0
+            
+            local btnCorner = Instance.new("UICorner")
+            btnCorner.CornerRadius = UDim.new(1, 0)
+            btnCorner.Parent = btn
+
+            local h = (math.atan2(dy, dx) / (2 * math.pi)) % 1
+            local s = math.clamp(dist / maxDist, 0, 1)
+            
+            btn.BackgroundColor3 = Color3.fromHSV(h, s, 1) 
+            btn.Parent = bgPickerFrame
+            btn.MouseButton1Click:Connect(function()
+                if CONFIG.UI_BgValue < 0.05 then
+                    CONFIG.UI_BgValue = 1
+                    if updateBgBrightness then updateBgBrightness(1) end
+                end
+                CONFIG.UI_BgColor = Color3.fromHSV(h, s, CONFIG.UI_BgValue)
+                bgRgbBox.Text = string.format("%d, %d, %d", math.floor(CONFIG.UI_BgColor.R*255+0.5), math.floor(CONFIG.UI_BgColor.G*255+0.5), math.floor(CONFIG.UI_BgColor.B*255+0.5))
+                bgHexBox.Text = rgbToHex(CONFIG.UI_BgColor)
+                applyUITheme()
+                bgPickerFrame.Visible = false
+            end)
+        end
+    end
+end
+
+bgPickBtn.MouseButton1Click:Connect(function()
+    bgPickerFrame.Visible = not bgPickerFrame.Visible
+end)
+
+bgRgbBox.FocusLost:Connect(function()
+    local nums = {}
+    for num in string.gmatch(bgRgbBox.Text, "%d+") do
+        table.insert(nums, tonumber(num))
+    end
+    if #nums >= 3 then
+        local c = Color3.fromRGB(math.clamp(nums[1], 0, 255), math.clamp(nums[2], 0, 255), math.clamp(nums[3], 0, 255))
+        CONFIG.UI_BgColor = c
+        local h, s, v = Color3.toHSV(c)
+        CONFIG.UI_BgValue = v
+        if updateBgBrightness then updateBgBrightness(v) end
+        bgHexBox.Text = rgbToHex(c)
+        applyUITheme()
+    end
+    bgRgbBox.Text = string.format("%d, %d, %d", math.floor(CONFIG.UI_BgColor.R*255+0.5), math.floor(CONFIG.UI_BgColor.G*255+0.5), math.floor(CONFIG.UI_BgColor.B*255+0.5))
+end)
+
+bgHexBox.FocusLost:Connect(function()
+    local c = hexToRgb(bgHexBox.Text)
+    if c then
+        CONFIG.UI_BgColor = c
+        local h, s, v = Color3.toHSV(c)
+        CONFIG.UI_BgValue = v
+        if updateBgBrightness then updateBgBrightness(v) end
+        bgRgbBox.Text = string.format("%d, %d, %d", math.floor(c.R*255+0.5), math.floor(c.G*255+0.5), math.floor(c.B*255+0.5))
+        applyUITheme()
+    end
+    bgHexBox.Text = rgbToHex(CONFIG.UI_BgColor)
+end)
+
+local bgBriRow, bgBriSet = addSlider(pageColors, "Background Brightness", 0, 1, CONFIG.UI_BgValue, true, function(v)
+    CONFIG.UI_BgValue = v
+    local h, s, _ = Color3.toHSV(CONFIG.UI_BgColor)
+    CONFIG.UI_BgColor = Color3.fromHSV(h, s, v)
+    bgRgbBox.Text = string.format("%d, %d, %d", math.floor(CONFIG.UI_BgColor.R*255+0.5), math.floor(CONFIG.UI_BgColor.G*255+0.5), math.floor(CONFIG.UI_BgColor.B*255+0.5))
+    bgHexBox.Text = rgbToHex(CONFIG.UI_BgColor)
+    applyUITheme()
+end)
+updateBgBrightness = bgBriSet
+
+-- INTERFACE SETTINGS (Page: UI_Settings)
+addSection(pageUI, "Interface Settings")
+addSlider(pageUI, "Menu Opacity", 0, 1, CONFIG.UI_BgTrans, true, function(v) CONFIG.UI_BgTrans = v; applyUITheme() end)
+addSlider(pageUI, "Text Opacity", 0, 1, CONFIG.UI_TextTrans, true, function(v) CONFIG.UI_TextTrans = v; applyUITheme() end)
+addSlider(pageUI, "Text Size", 8, 16, CONFIG.UI_TextSize, false, function(v) CONFIG.UI_TextSize = math.floor(v + 0.5); applyUITheme() end)
+
+addSection(pageUI, "Settings")
+addToggle(pageUI, "Team Color ESP", CONFIG.TeamColorESP, function(v)
+    CONFIG.TeamColorESP = v
+    applyHighlightStyles()
+    applyTracerStyles()
+    applyAlertStyles()
+end)
+addSlider(pageUI, "Visibility Rate", 0.02, 0.20, CONFIG.VisibilityCheckRate, true, function(v)
+    CONFIG.VisibilityCheckRate = v
+end)
+
+makeTab("Visual",  "Visual")
+makeTab("Box & HP", "BoxHP")
+makeTab("Tracers", "Tracers")
+makeTab("Alert",   "Alert")
+makeTab("Aim",     "Aim")
+makeTab("UI Colors", "UI_Colors")
+makeTab("UI Settings", "UI_Settings")
+
+pages["Visual"].Visible = true
+for _, sib in ipairs(sidebar:GetChildren()) do
+    if sib:IsA("TextButton") then
+        local ind = sib:FindFirstChildOfClass("Frame")
+        if ind then
+            sib.BackgroundTransparency = 0; sib.TextColor3 = TEXT_MAIN; ind.Visible = true
+        end
+        break
+    end
+end
+
+_G.__espKill.keybind = UserInputService.InputBegan:Connect(function(input, gpe)
+    if gpe then return end
+    if _G.__espKill.dead then return end
+    if input.KeyCode == Enum.KeyCode.RightShift then main.Visible = not main.Visible end
+end)
+
+print("[ESP Hub] Загружено: v4.8 (Split UI Colors & Settings)")
