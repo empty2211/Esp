@@ -64,15 +64,16 @@ local CONFIG = {
     BackAlertRadiusX = 0.20,
     BackAlertRadiusY = 0.20,
 
+    -- Обновленные настройки Box & HP
     BoxEnabled = true,
     BoxThickness = 1,
-    BoxTransparency = 0.15,
-    BoxWidthRatio = 0.55,
+    BoxTransparency = 0.50,
+    BoxWidthRatio = 0.89,
 
     HPBarEnabled = true,
     HPTextEnabled = true,
-    HPTransparency = 0.1,
-    HPBarHeight = 4,
+    HPTransparency = 0.80,
+    HPBarHeight = 2,
 
     DistTextEnabled = true,
 
@@ -1630,4 +1631,4 @@ _G.__espKill.keybind = UserInputService.InputBegan:Connect(function(input, gpe)
     if input.KeyCode == Enum.KeyCode.RightShift then main.Visible = not main.Visible end
 end)
 
-print("[ESP Hub] Загружено: v4.7 (Stable RGB/HEX + Custom Toggles)")
+print("[ESP Hub] Загружено: v4.7 (Defaults updated)")
