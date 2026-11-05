@@ -84,7 +84,7 @@ local CONFIG = {
     AimPrediction = 0.15,
     AimDrawFOV = true,
 
-    -- UI Customization (Defaults from screenshot)
+    -- UI Customization
     UI_Accent = Color3.fromRGB(255, 255, 255),
     UI_Value = 1,
     UI_BgColor = Color3.fromRGB(0, 0, 0),
@@ -93,6 +93,11 @@ local CONFIG = {
     UI_TextTrans = 0.0,
     UI_TextSize = 12,
 }
+
+-- Цвета для переключателей (как на референсе)
+local TOGGLE_ON_COLOR = Color3.fromRGB(0, 200, 0)
+local TOGGLE_OFF_COLOR = Color3.fromRGB(100, 100, 100)
+local TOGGLE_KNOB_COLOR = Color3.fromRGB(255, 255, 255)
 
 local ESP_ENABLED = true
 local VISIBILITY_ENABLED = true
@@ -838,7 +843,7 @@ local tbAccentCorner = Instance.new("UICorner"); tbAccentCorner.CornerRadius = U
 
 local titleLabel = Instance.new("TextLabel")
 titleLabel.Size = UDim2.new(1, -130, 1, 0); titleLabel.Position = UDim2.new(0, 22, 0, 0); titleLabel.BackgroundTransparency = 1
-titleLabel.Text = "ESP HUB v4.6"; titleLabel.TextColor3 = TEXT_MAIN; titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+titleLabel.Text = "ESP HUB v4.7"; titleLabel.TextColor3 = TEXT_MAIN; titleLabel.TextXAlignment = Enum.TextXAlignment.Left
 titleLabel.Font = Enum.Font.GothamBold; titleLabel.TextSize = CONFIG.UI_TextSize; titleLabel.TextTransparency = CONFIG.UI_TextTrans; titleLabel.Parent = titleBar
 
 local hintLabel = Instance.new("TextLabel")
@@ -1030,21 +1035,22 @@ local function addToggle(parent, name, initial, callback)
     lbl.TextTransparency = CONFIG.UI_TextTrans
     local btn = Instance.new("TextButton")
     btn.Name = "ToggleBtn"
-    btn.Size = UDim2.new(0, 40, 0, 18); btn.Position = UDim2.new(1, -50, 0.5, -9); btn.BackgroundColor3 = initial and CONFIG.UI_Accent or Color3.fromRGB(45, 45, 55)
+    btn.Size = UDim2.new(0, 44, 0, 22); btn.Position = UDim2.new(1, -54, 0.5, -11); 
+    btn.BackgroundColor3 = initial and TOGGLE_ON_COLOR or TOGGLE_OFF_COLOR
     btn.BorderSizePixel = 0; btn.Text = ""; btn.AutoButtonColor = false; btn.Parent = row
-    btn.TextTransparency = CONFIG.UI_TextTrans
-    local bc = Instance.new("UICorner"); bc.CornerRadius = UDim.new(0, 9); bc.Parent = btn
+    local bc = Instance.new("UICorner"); bc.CornerRadius = UDim.new(1, 0); bc.Parent = btn
     local knob = Instance.new("Frame")
-    knob.Size = UDim2.new(0, 14, 0, 14); knob.Position = initial and UDim2.new(1, -16, 0.5, -7) or UDim2.new(0, 2, 0.5, -7)
-    knob.BackgroundColor3 = Color3.fromRGB(240, 240, 240); knob.BorderSizePixel = 0; knob.Parent = btn
+    knob.Size = UDim2.new(0, 16, 0, 16)
+    knob.Position = initial and UDim2.new(1, -18, 0.5, -8) or UDim2.new(0, 2, 0.5, -8)
+    knob.BackgroundColor3 = TOGGLE_KNOB_COLOR; knob.BorderSizePixel = 0; knob.Parent = btn
     local kc = Instance.new("UICorner"); kc.CornerRadius = UDim.new(1, 0); kc.Parent = knob
     local state = initial
     btn:SetAttribute("State", state)
     btn.MouseButton1Click:Connect(function()
         state = not state
         btn:SetAttribute("State", state)
-        btn.BackgroundColor3 = state and CONFIG.UI_Accent or Color3.fromRGB(45, 45, 55)
-        knob.Position = state and UDim2.new(1, -16, 0.5, -7) or UDim2.new(0, 2, 0.5, -7)
+        btn.BackgroundColor3 = state and TOGGLE_ON_COLOR or TOGGLE_OFF_COLOR
+        knob.Position = state and UDim2.new(1, -18, 0.5, -8) or UDim2.new(0, 2, 0.5, -8)
         if callback then callback(state) end
     end)
     return row
@@ -1271,7 +1277,11 @@ local function applyUITheme()
             end
         elseif desc.Name == "ToggleBtn" then
             if desc:IsA("TextButton") then
-                if desc:GetAttribute("State") then desc.BackgroundColor3 = CONFIG.UI_Accent end
+                if desc:GetAttribute("State") then 
+                    desc.BackgroundColor3 = TOGGLE_ON_COLOR 
+                else 
+                    desc.BackgroundColor3 = TOGGLE_OFF_COLOR 
+                end
                 desc.TextTransparency = CONFIG.UI_TextTrans
             end
         elseif desc.Name == "MainStroke" or desc.Name == "AimStroke" or desc.Name == "MobileStroke" then
@@ -1620,4 +1630,4 @@ _G.__espKill.keybind = UserInputService.InputBegan:Connect(function(input, gpe)
     if input.KeyCode == Enum.KeyCode.RightShift then main.Visible = not main.Visible end
 end)
 
-print("[ESP Hub] Загружено: v4.6 (Stable RGB/HEX + BgColor)")
+print("[ESP Hub] Загружено: v4.7 (Stable RGB/HEX + Custom Toggles)")
